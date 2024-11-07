@@ -10,12 +10,11 @@ import asyncio
 from openai import AsyncOpenAI
 import tiktoken
 
-# Configuration
-MAX_TOKENS = 4000
-
-# Constants (Update these as needed)
-OPENAI_API_KEY = "sk-xHL0kngakTDUdRieTDnFsqT8ITq0NXs3B5CYkCV_2JT3BlbkFJYS7kWpjOra5REMF66hGsVIErt-o7YukDUavqzG640A"  # Replace with your OpenAI API key
-OPENAI_MODEL = "gpt-4o-mini"  # Example model name
+try:
+    from config import OPENAI_API_KEY, OPENAI_MODEL, MAX_TOKENS
+except ImportError:
+    print("Please create a config.py file with your API key and settings")
+    raise
 
 # Initialize OpenAI Async Client
 client = AsyncOpenAI(
