@@ -6,6 +6,21 @@ import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import re
+import asyncio
+from openai import AsyncOpenAI
+import tiktoken
+
+# Configuration
+MAX_TOKENS = 4000
+
+# Constants (Update these as needed)
+OPENAI_API_KEY = "sk-xHL0kngakTDUdRieTDnFsqT8ITq0NXs3B5CYkCV_2JT3BlbkFJYS7kWpjOra5REMF66hGsVIErt-o7YukDUavqzG640A"  # Replace with your OpenAI API key
+OPENAI_MODEL = "gpt-4o-mini"  # Example model name
+
+# Initialize OpenAI Async Client
+client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY,
+)
 
 # Global request tracking
 config_calls = 0
@@ -33,7 +48,7 @@ class ExperimentOracle:
             self.num_agents = p_joint.ndim
             self.task_description = "The following are abstract reviews."
         elif self.exp_type == "llm":
-            self.num_agents = 6
+            self.num_agents = 3
             self.task_description = "The following are abstract reviews."
         else:
             raise ValueError("exp_type must be either 'synthetic' or 'llm'.")
@@ -85,7 +100,7 @@ class ExperimentOracle:
 
         return contexts, agent_perspectives, string_data
 
-    def generate_llm_data(self, n_tasks, preload=True):
+    async def generate_llm_data(self, n_tasks, preload=False):
         """
         Generate data by making actual calls to an LLM or load preloaded data.
 
@@ -115,42 +130,35 @@ class ExperimentOracle:
             if len(string_data) < n_tasks:
                 print(f"Warning: Requested {n_tasks} tasks, but only {len(string_data)} available in preloaded data.")
 
-        else:
-            # Todo: Existing code for generating new data
-            # Hard-coded file name
-            file_name = "playground/peer_prediction/Assets/extracted_data_abstract_title.json"
 
-            # Load data from JSON file
-            print("Loading Data")
-            with open(file_name, "r") as file:
-                data = json.load(file)
+        # Load contexts
+        with open("data/extracted_data_abstract_title.json", "r") as file:
+            data = json.load(file)
+        contexts = [item["instruction"] for item in data[:n_tasks]]
 
-            # Ensure we have enough contexts
-            data = data[:n_tasks]
-            contexts = [item["instruction"] for item in data]
+        # Define agent perspectives
+        agent_perspectives = [
+            {"reading": None, "strategy": None},
+            {"reading": None, "strategy": None},
+            {"reading": None, "strategy": None},
+        ]
 
-            agent_perspectives = [
-                {"reading": None, "strategy": None},
-                {"reading": None, "strategy": None},
-                {"reading": None, "strategy": None},
-            ]
+        # Generate responses asynchronously 
+        async def process_context(context):
+            responses = []
+            for perspective in agent_perspectives:
+                response, _ = await generate_completion_async(
+                    f"{perspective.get('strategy', '')}\n\n{context}",
+                    OPENAI_MODEL,
+                    MAX_TOKENS
+                )
+                responses.append(response if response else "No response generated")
+            return {"context": context, "responses": responses}  # Changed structure here
 
-            # Generate responses for each context and perspective
-            string_data = self.process_perspectives(agent_perspectives, contexts)
+        # Process all contexts in parallel
+        tasks = await asyncio.gather(*[process_context(ctx) for ctx in contexts])
 
-            # Add contexts to string_data
-            for i, task in enumerate(string_data):
-                task["context"] = contexts[i]
-
-        # Save the string data to JSON (for both preloaded and newly generated data)
-        save_experiment_dataset(
-            tasks=string_data,
-            task_description=self.task_description,
-            agent_perspectives=agent_perspectives,
-            filename="data/llm_experiment_data.json",
-        )
-
-        return contexts, agent_perspectives, string_data
+        return contexts, agent_perspectives, tasks
 
     def process_perspectives(self, perspectives, contexts):
         """
@@ -314,6 +322,62 @@ class ExperimentOracle:
         )
         return pairwise_joint / pairwise_joint.sum()  # Normalize
 
+## API
+
+def count_tokens(text: str, model = 'gpt-4o-mini') -> int:
+    model = 'gpt-4o-mini'
+    """
+    Counts the number of tokens in the given text for the specified model.
+
+    Args:
+        text (str): The text to count tokens for.
+        model (str): The OpenAI model name.
+
+    Returns:
+        int: The number of tokens.
+    """
+    encoding = tiktoken.encoding_for_model(model)
+
+    return len(encoding.encode(text))
+
+async def generate_completion_async(prompt: str, model_name: str, max_tokens: int) -> Tuple[Optional[str], int]:
+    """
+    Asynchronously generates a completion using OpenAI's Chat Completions API.
+
+    Args:
+        prompt (str): The prompt to send to the model.
+        model_name (str): The name of the OpenAI model to use.
+        max_tokens (int): The maximum number of tokens to generate.
+
+    Returns:
+        Tuple[Optional[str], int]: A tuple containing the generated completion text (or None if an error occurs) and the number of tokens used in this call.
+    """
+    try:
+        # Count tokens in the prompt
+        token_count_prompt = count_tokens(prompt, model_name)
+
+        # Create the chat completion asynchronously
+        response = await client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=1.0,
+        )
+
+        # Extract the assistant's reply
+        assistant_message = response.choices[0].message.content
+
+        # Count tokens in the response
+        token_count_response = count_tokens(assistant_message, model_name)
+
+        # Calculate total tokens for this call
+        tokens_used = token_count_prompt + token_count_response
+
+        return assistant_message, tokens_used
+
+    except Exception as e:
+        print(f"Error generating completion: {str(e)}")
+        return None, 0
 
 ## Mechanisms
 
@@ -497,66 +561,36 @@ def calculate_agent_scores(data, oracle):
     print()
     return all_comparisons
 
-
-def experiment(oracle, n_tasks):
+def save_experiment_dataset(
+    tasks: List[Dict[str, Any]], 
+    task_description: str,
+    agent_perspectives: List[Dict[str, Any]],
+    filename: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None
+):
     """
-    Run the experiment for different numbers of tasks and compare results.
-    """
-    if oracle.exp_type == "synthetic":
-        true_tvd_mi_matrix = oracle.calculate_true_tvd_mi_matrix()
-
-        # Print true TVD-MI matrix and agent scores
-        print_matrix(true_tvd_mi_matrix, "True TVD-MI Scores")
-
-        print("True Agent TVD-MI scores (sum over columns of matrix):")
-        true_agent_scores = true_tvd_mi_matrix.sum(axis=0)
-        for i, score in enumerate(true_agent_scores):
-            print(f"Agent {i+1}: {score:.4f}")
-        print()
-
-    print("Generating Data\n")
-    contexts, perspectives, responses = oracle.generate_data(n_tasks)
-
-    print("Scoring Mechanism\n")
-    all_comparisons = calculate_agent_scores(responses, oracle)
-
-    print("Saving Results\n")
-    save_experiment_results(
-        task_description=oracle.task_description,
-        agent_perspectives=perspectives,
-        all_comparisons=all_comparisons,
-        filename=f"data/{oracle.exp_type}_experiment_results.json",
-    )
-
-    return all_comparisons
-
-
-def save_experiment_dataset(tasks, task_description, agent_perspectives, filename=None):
-    """
-    Saves the experiment dataset to a JSON file with the specified structure.
+    Enhanced version of save_experiment_dataset that includes metadata.
 
     Args:
-        tasks (List[Dict[str, Any]]): A list of task dictionaries, each containing a context and its responses.
-        task_description (str): A description of the task.
-        agent_perspectives (List[Dict[str, Any]]): A list of agent perspective dictionaries.
-        filename (Optional[str], optional): The filename to save the dataset. Defaults to None.
-
-    Returns:
-        str: The path to the saved JSON file.
+        tasks: List of task dictionaries containing context and responses
+        task_description: Description of the task
+        agent_perspectives: List of agent perspective dictionaries
+        filename: Optional custom filename
+        metadata: Optional metadata about the experiment run (tokens used, timing, etc)
     """
     if filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = (
-            f"data/experiment_dataset_{timestamp}.json"
-        )
+        filename = f"data/experiment_dataset_{timestamp}.json"
 
     dataset = {
         "task_description": task_description,
         "agent_perspectives": agent_perspectives,
-        "tasks": [
-            {"context": task.get("context"), "responses": task["responses"]}
-            for task in tasks
-        ],
+        "tasks": [{
+            "context": task.get("context"),
+            "responses": task["responses"]
+        } for task in tasks],
+        "metadata": metadata or {},
+        "timestamp": datetime.now().isoformat()
     }
 
     try:
@@ -656,8 +690,71 @@ def print_matrix(matrix, title):
         print(row)
     print()
 
+async def experiment(oracle, n_tasks):
+    """
+    Run the experiment with enhanced data saving.
+    """
+    start_time = datetime.now()
+    metadata = {
+        "experiment_type": oracle.exp_type,
+        "n_tasks": n_tasks,
+        "num_agents": oracle.get_num_agents(),
+        "start_time": start_time.isoformat(),
+        "token_usage": {
+            "total_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_tokens": 0
+        },
+        "api_calls": {
+            "total_calls": 0,
+            "successful_calls": 0,
+            "failed_calls": 0
+        }
+    }
 
-def main():
+    if oracle.exp_type == "synthetic":
+        true_tvd_mi_matrix = oracle.calculate_true_tvd_mi_matrix()
+        print_matrix(true_tvd_mi_matrix, "True TVD-MI Scores")
+        contexts, perspectives, responses = oracle.generate_data(n_tasks)
+    else:
+        print("Generating Data\n")
+        contexts, perspectives, responses = await oracle.generate_llm_data(n_tasks)
+
+    print("Scoring Mechanism\n")
+    all_comparisons = calculate_agent_scores(responses, oracle)
+
+    # Update metadata with final statistics
+    end_time = datetime.now()
+    metadata.update({
+        "end_time": end_time.isoformat(),
+        "duration_seconds": (end_time - start_time).total_seconds(),
+        "f_calls": f_calls,
+        "judge_calls": judge_calls,
+        "token_usage": {
+            "total_tokens": tokens,
+            "completion_tokens": config_tokens,
+        }
+    })
+
+    # Save both the dataset and results
+    save_experiment_dataset(
+        tasks=responses,
+        task_description=oracle.task_description,
+        agent_perspectives=perspectives,
+        filename=f"data/{oracle.exp_type}_experiment_data_{start_time:%Y%m%d_%H%M%S}.json",
+        metadata=metadata
+    )
+
+    save_experiment_results(
+        task_description=oracle.task_description,
+        agent_perspectives=perspectives,
+        all_comparisons=all_comparisons,
+        filename=f"data/{oracle.exp_type}_experiment_results_{start_time:%Y%m%d_%H%M%S}.json"
+    )
+
+    return all_comparisons
+
+async def main_async():
     """
     Main function to run the experiment.
 
@@ -666,7 +763,7 @@ def main():
     # Set experiment type: 'synthetic' or 'llm'
     exp_type = "llm"  # Change to 'llm' to use LLM mode
     oracle = ExperimentOracle(exp_type=exp_type)
-    n_tasks = 50  # Updated number of tasks as per your request
+    n_tasks = 10  # Updated number of tasks as per your request
 
     # Calculate and print the total number of calls before running the experiment
     f_total, judge_total = calculate_total_calls(oracle.get_num_agents(), n_tasks)
@@ -677,7 +774,7 @@ def main():
     print()
 
     print("Starting Experiment\n")
-    all_comparisons = experiment(oracle, n_tasks)
+    all_comparisons = await experiment(oracle, n_tasks)
 
     # Calculate empirical TVD-MI matrix
     num_agents = oracle.get_num_agents()
@@ -728,6 +825,11 @@ def main():
     print(f"Actual judge calls: {judge_calls}")
     print(f"Total actual oracle calls: {f_calls + judge_calls}")
 
+def main():
+    """
+    Main function to run the experiment, calculate scores, and save results.
+    """
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
