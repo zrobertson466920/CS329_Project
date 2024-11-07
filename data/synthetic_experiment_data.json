@@ -1,0 +1,419 @@
+{
+  "task_description": "The following are abstract reviews.",
+  "agent_perspectives": [
+    {
+      "reading": null,
+      "strategy": null
+    },
+    {
+      "reading": null,
+      "strategy": null
+    },
+    {
+      "reading": null,
+      "strategy": null
+    }
+  ],
+  "tasks": [
+    {
+      "context": "Synthetic context 1",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 2",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 3",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 4",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 5",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 6",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 7",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 8",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 9",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 10",
+      "responses": [
+        "I really like it!",
+        "I really dislike it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 11",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 12",
+      "responses": [
+        "I really like it!",
+        "I really dislike it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 13",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 14",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 15",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 16",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 17",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 18",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 19",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 20",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 21",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 22",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 23",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 24",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 25",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 26",
+      "responses": [
+        "I really like it!",
+        "I really dislike it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 27",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 28",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 29",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 30",
+      "responses": [
+        "I really like it!",
+        "I really dislike it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 31",
+      "responses": [
+        "I really like it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 32",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 33",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 34",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 35",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 36",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 37",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 38",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 39",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 40",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 41",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 42",
+      "responses": [
+        "I really like it!",
+        "I really dislike it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 43",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 44",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 45",
+      "responses": [
+        "I really dislike it!",
+        "I really dislike it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 46",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 47",
+      "responses": [
+        "I really like it!",
+        "I really dislike it!",
+        "I really like it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 48",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 49",
+      "responses": [
+        "I really like it!",
+        "I really like it!",
+        "I really dislike it!"
+      ]
+    },
+    {
+      "context": "Synthetic context 50",
+      "responses": [
+        "I really dislike it!",
+        "I really like it!",
+        "I really like it!"
+      ]
+    }
+  ]
+}
