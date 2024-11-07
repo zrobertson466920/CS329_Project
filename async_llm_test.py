@@ -30,27 +30,68 @@ tokens = 0
 
 
 class ExperimentOracle:
-    def __init__(self, exp_type="synthetic", llm_model=None):
+    def __init__(self, exp_config: Dict[str, Any]):
         """
-        Initialize the ExperimentOracle with the specified experiment type.
+        Initialize ExperimentOracle with a configuration dictionary.
 
-        Parameters:
-            - exp_type (str): 'synthetic' or 'llm'
-            - llm_model: Placeholder for the LLM model (e.g., OpenAI's GPT)
+        Example exp_config:
+        {
+            "exp_type": "llm" | "synthetic",
+            "num_agents": int,
+            "model_config": {
+                "model_name": str,
+                "max_tokens": int,
+                "temperature": float,
+            },
+            "agent_perspectives": [
+                {
+                    "reading": str | None,
+                    "strategy": str | None
+                },
+                ...
+            ],
+            "task_description": str,
+            "data_config": {
+                "data_path": str,
+                "n_tasks": int,
+                "preload": bool,
+                "preload_path": str | None
+            }
+        }
         """
-        self.exp_type = exp_type
-        self.llm_model = llm_model  # Placeholder for actual LLM integration
+        # Required parameters
+        self.exp_type = exp_config["exp_type"]
+        self.num_agents = exp_config["num_agents"]
 
+        # Optional parameters with defaults
+        self.model_config = exp_config.get("model_config", {
+            "model_name": "gpt-4o-mini",
+            "max_tokens": 4000,
+            "temperature": 1.0
+        })
+
+        self.task_description = exp_config.get("task_description", 
+            "The following are abstract reviews."
+        )
+
+        self.data_config = exp_config.get("data_config", {
+            "data_path": "data/extracted_data_abstract_title.json",
+            "n_tasks": 10,
+            "preload": False,
+            "preload_path": None
+        })
+
+        # Handle synthetic case
         if self.exp_type == "synthetic":
-            p_joint = np.array([[[0.3, 0.0], [0.0, 0.3]], [[0.05, 0.05], [0.2, 0.1]]])
-            self.p_joint = p_joint
-            self.num_agents = p_joint.ndim
-            self.task_description = "The following are abstract reviews."
-        elif self.exp_type == "llm":
-            self.num_agents = 3
-            self.task_description = "The following are abstract reviews."
-        else:
-            raise ValueError("exp_type must be either 'synthetic' or 'llm'.")
+            if self.num_agents != 3:
+                raise ValueError("Synthetic mode currently only supports 3 agents")
+            self.p_joint = np.array([[[0.3, 0.0], [0.0, 0.3]], [[0.05, 0.05], [0.2, 0.1]]])
+
+        # Set agent perspectives
+        self.agent_perspectives = exp_config.get("agent_perspectives", [
+            {"reading": None, "strategy": None} 
+            for _ in range(self.num_agents)
+        ])
 
     def generate_data(self, n_tasks):
         """
@@ -99,65 +140,93 @@ class ExperimentOracle:
 
         return contexts, agent_perspectives, string_data
 
-    async def generate_llm_data(self, n_tasks, preload=False):
+    async def generate_llm_data(self, n_tasks=None, preload=None):
         """
         Generate data by making actual calls to an LLM or load preloaded data.
 
         Args:
-        - n_tasks (int): Number of tasks to generate or load.
-        - preload (bool): If True, load data from a preloaded file. If False, generate new data.
+            n_tasks (int, optional): Number of tasks to generate/load. Defaults to config value.
+            preload (bool, optional): Whether to load preexisting data. Defaults to config value.
 
         Returns:
-        - contexts (list): List of context strings.
-        - agent_perspectives (list): List of agent perspective dictionaries.
-        - string_data (list): List of dictionaries containing context and responses.
+            Tuple[List[str], List[Dict], List[Dict]]: 
+                - contexts: List of original contexts
+                - agent_perspectives: List of agent perspective configurations
+                - tasks: List of task dictionaries containing context and responses
         """
-        if preload:
-            # Load preloaded data from JSON file
-            file_name = "data/preload_llm_experiment_data.json"
-            print(f"Loading preloaded data from {file_name}")
+        # Use config values if not specified
+        if n_tasks is None:
+            n_tasks = self.data_config["n_tasks"]
+        if preload is None:
+            preload = self.data_config.get("preload", False)
 
-            with open(file_name, "r") as file:
+        if preload:
+            preload_path = self.data_config.get("preload_path", "data/preload_llm_experiment_data.json")
+            print(f"Loading preloaded data from {preload_path}")
+
+            with open(preload_path, "r") as file:
                 data = json.load(file)
 
             # Extract contexts, agent_perspectives, and string_data
             contexts = [task['context'] for task in data['tasks'][:n_tasks]]
             agent_perspectives = data['agent_perspectives']
-            string_data = data['tasks'][:n_tasks]
+            tasks = data['tasks'][:n_tasks]
 
             # Ensure we have the correct number of tasks
-            if len(string_data) < n_tasks:
-                print(f"Warning: Requested {n_tasks} tasks, but only {len(string_data)} available in preloaded data.")
+            if len(tasks) < n_tasks:
+                print(f"Warning: Requested {n_tasks} tasks, but only {len(tasks)} available in preloaded data.")
 
+            return contexts, agent_perspectives, tasks
 
-        # Load contexts
-        with open("data/extracted_data_abstract_title.json", "r") as file:
+        # Load contexts from configured path
+        data_path = self.data_config.get("data_path", "data/extracted_data_abstract_title.json")
+        with open(data_path, "r") as file:
             data = json.load(file)
         contexts = [item["instruction"] for item in data[:n_tasks]]
-
-        # Define agent perspectives
-        agent_perspectives = [
-            {"reading": None, "strategy": None},
-            {"reading": None, "strategy": None},
-            {"reading": None, "strategy": None},
-        ]
 
         # Generate responses asynchronously 
         async def process_context(context):
             responses = []
-            for perspective in agent_perspectives:
-                response, _ = await generate_completion_async(
-                    f"{perspective.get('strategy', '')}\n\n{context}",
-                    OPENAI_MODEL,
-                    MAX_TOKENS
-                )
-                responses.append(response if response else "No response generated")
-            return {"context": context, "responses": responses}  # Changed structure here
+            for perspective in self.agent_perspectives:
+                if perspective["strategy"] is None:
+                    # Null model constant response
+                    response = "This abstract discusses important research findings. The methodology appears sound. Further investigation may be warranted."
+                    tokens_used = count_tokens(response, self.model_config["model_name"])
+                else:
+                    prompt = f"{perspective.get('strategy', '')}\n\n{context}"
+                    response, tokens_used = await generate_completion_async(
+                        prompt,
+                        self.model_config["model_name"],
+                        self.model_config["max_tokens"]
+                    )
+                    response = response if response else "No response generated"
+
+                responses.append(response)
+
+            return {"context": context, "responses": responses}
 
         # Process all contexts in parallel
+        print(f"Generating responses for {n_tasks} contexts...")
         tasks = await asyncio.gather(*[process_context(ctx) for ctx in contexts])
 
-        return contexts, agent_perspectives, tasks
+        # Save data immediately for debugging/inspection
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_filename = f"data/llm_data_debug_{timestamp}.json"
+
+        save_experiment_dataset(
+            tasks=tasks,
+            task_description=self.task_description,
+            agent_perspectives=self.agent_perspectives,
+            filename=debug_filename,
+            metadata={
+                "model_config": self.model_config,
+                "data_config": self.data_config,
+                "generation_time": timestamp
+            }
+        )
+        print(f"Debug data saved to {debug_filename}")
+
+        return contexts, self.agent_perspectives, tasks
 
     def process_perspectives(self, perspectives, contexts):
         """
@@ -689,10 +758,14 @@ def print_matrix(matrix, title):
         print(row)
     print()
 
-async def experiment(oracle, n_tasks):
+async def experiment(oracle, n_tasks = None):
     """
     Run the experiment with enhanced data saving.
     """
+
+    if n_tasks is None:
+        n_tasks = oracle.data_config["n_tasks"]
+
     start_time = datetime.now()
     metadata = {
         "experiment_type": oracle.exp_type,
@@ -756,13 +829,31 @@ async def experiment(oracle, n_tasks):
 async def main_async():
     """
     Main function to run the experiment.
-
-    To switch between modes, change the `exp_type` parameter to 'synthetic' or 'llm'.
     """
-    # Set experiment type: 'synthetic' or 'llm'
-    exp_type = "llm"  # Change to 'llm' to use LLM mode
-    oracle = ExperimentOracle(exp_type=exp_type)
-    n_tasks = 10  # Updated number of tasks as per your request
+    # Define experiment configuration
+    exp_config = {
+        "exp_type": "llm",
+        "num_agents": 3,
+        "model_config": {
+            "model_name": OPENAI_MODEL,
+            "max_tokens": MAX_TOKENS,
+            "temperature": 1.0
+        },
+        "agent_perspectives": [
+            {"reading": None, "strategy": "Please review the following abstract in three sentences."},
+            {"reading": None, "strategy": "Please review the following abstract in three sentences."},
+            {"reading": None, "strategy": None}  # Null model
+        ],
+        "data_config": {
+            "n_tasks": 10,
+            "preload": False
+        }
+    }
+
+    oracle = ExperimentOracle(exp_config)
+
+    # Use n_tasks from config
+    n_tasks = exp_config["data_config"]["n_tasks"]
 
     # Calculate and print the total number of calls before running the experiment
     f_total, judge_total = calculate_total_calls(oracle.get_num_agents(), n_tasks)

@@ -1,129 +1,83 @@
-# LLM Evaluation Framework
+# Async LLM Testing Framework
 
-This framework implements and compares two methods for evaluating Language Model (LLM) outputs:
-1. Total Variation Distance Mutual Information (TVD-MI) 
-2. Standard LLM-as-Judge approach
+This project implements an asynchronous framework for testing and evaluating LLM responses using peer prediction methods.
 
-## Core Components
+## Overview
 
-The framework consists of three main parts:
+The framework supports both synthetic and LLM-based experiments through a unified configuration system. It uses asynchronous API calls for efficient data generation and evaluation.
 
-1. **ExperimentOracle** (`class ExperimentOracle`)
-   - Handles data generation and evaluation logic
-   - Supports both synthetic and LLM-based experiments
-   - Methods for TVD-MI calculation and judge evaluation
+## Configuration
 
-2. **Mechanisms** (Multiple functions)
-   - `generate_judge_prompt`: Creates prompts for LLM judge evaluation
-   - `generate_tvd_mi_prompt`: Creates prompts for TVD-MI evaluation
-   - `llm_approximation`: Approximates TVD-MI using LLM responses
+Experiments are configured using a dictionary structure:
 
-3. **Experiment Runner** (`experiment()` function)
-   - Coordinates experiment execution
-   - Handles data collection and scoring
-   - Saves results in standardized format
+```python
+exp_config = {
+    "exp_type": "llm" | "synthetic",  # Type of experiment
+    "num_agents": int,                # Number of agents (3 for synthetic)
+    "model_config": {
+        "model_name": str,            # Name of LLM model
+        "max_tokens": int,            # Max tokens per response
+        "temperature": float,         # Temperature for generation
+    },
+    "agent_perspectives": [           # List of agent configurations
+        {
+            "reading": str | None,    # Reading transformation
+            "strategy": str | None,   # Response strategy
+        },
+        ...
+    ],
+    "task_description": str,          # Description of the task
+    "data_config": {
+        "data_path": str,             # Path to input data
+        "n_tasks": int,               # Number of tasks
+        "preload": bool,              # Whether to use preloaded data
+        "preload_path": str | None    # Path to preloaded data
+    }
+}
+```
+
+## Key Components
+
+1. `ExperimentOracle`: Main class that handles experiment configuration and execution
+2. Async Data Generation: Uses `asyncio` for efficient API calls
+3. Data Saving: Automatic saving of experiment data and results
+4. Metrics: Calculates TVD-MI scores and judge evaluations
 
 ## Usage
 
-### Basic Usage
+Basic usage:
 
 ```python
-# Initialize oracle
-oracle = ExperimentOracle(exp_type="llm")  # or "synthetic"
-n_tasks = 50
-
-# Run experiment
-all_comparisons = experiment(oracle, n_tasks)
+async def main():
+    # Define experiment configuration
+    exp_config = {...}  # Set configuration parameters
+    
+    # Create oracle
+    oracle = ExperimentOracle(exp_config)
+    
+    # Run experiment
+    all_comparisons = await experiment(oracle)
+    
+    # Results are automatically saved to data directory
 ```
 
-### Experiment Types
+## File Structure
 
-1. Synthetic Experiments
-```python
-oracle = ExperimentOracle(exp_type="synthetic")
-```
-- Uses predefined joint distribution
-- Useful for validating implementation
-- Ground truth available for comparison
+- `async_llm_test.py`: Main implementation file
+- `data/`: Directory for experiment data and results
+  - Input data files
+  - Generated experiment results
+  - Debug output
 
-2. LLM Experiments
-```python
-oracle = ExperimentOracle(exp_type="llm")
-```
-- Works with actual text responses
-- Supports custom agent perspectives
-- Handles real-world evaluation scenarios
-- **TODOs:** upload your own data as argument, support LLM API calls
+## Requirements
 
-### Data Format
+- Python 3.12+
+- OpenAI API access
+- Required packages: numpy, asyncio, tiktoken
 
-Input datasets should follow this structure:
-```json
-{
-    "task_description": "string",
-    "agent_perspectives": [
-        {
-            "reading": "string or null",
-            "strategy": "string or null"
-        }
-    ],
-    "tasks": [
-        {
-            "context": "string",
-            "responses": ["string"]
-        }
-    ]
-}
-```
+## Notes
 
-### Results Format
-
-Results are saved in JSON format:
-```json
-{
-    "task_description": "string",
-    "agent_perspectives": [...],
-    "comparisons": [
-        {
-            "agent_pair": [i, j],
-            "result": float,
-            "x": "string",
-            "y": "string", 
-            "comparison_type": "critic|judge",
-            "prompt": "string"
-        }
-    ]
-}
-```
-
-## Key Features
-
-1. Efficient Subsampling
-   - Reduces comparisons from O(t²) to O(t)
-   - Maintains statistical validity
-   
-2. Symmetric Evaluation
-   - Eliminates order bias
-   - Balanced scoring across agents
-
-3. Flexible Agent Perspectives
-   - Supports multiple agent configurations
-   - Handles information asymmetry scenarios
-
-4. Results Analysis
-   - TVD-MI matrix calculation
-   - Judge score matrix
-   - Per-agent performance metrics
-
-## Resource Usage
-
-The framework tracks:
-- Number of LLM calls
-- Token usage
-- Execution time
-
-Formula for total calls:
-```python
-f_total = num_agents * (num_agents - 1) * (2 * n_tasks)
-judge_total = num_agents * (num_agents - 1) * (2 * n_tasks)
-```
+- Synthetic mode currently only supports 3 agents
+- LLM mode supports configurable number of agents
+- All API calls are asynchronous for better performance
+- Results are automatically saved with timestamps
