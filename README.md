@@ -1,83 +1,171 @@
-# Async LLM Testing Framework
+# LLM Evaluation Framework
 
-This project implements an asynchronous framework for testing and evaluating LLM responses using peer prediction methods.
+This project implements a framework for evaluating and comparing Language Model (LLM) responses using information-theoretic measures and pairwise comparisons.
 
 ## Overview
 
-The framework supports both synthetic and LLM-based experiments through a unified configuration system. It uses asynchronous API calls for efficient data generation and evaluation.
+The framework provides:
+- Automated data generation from LLM responses
+- Evaluation using both synthetic and LLM-based critics/judges
+- Information-theoretic scoring mechanisms
+- Asynchronous API handling for efficient processing
+- Comprehensive tracking of API usage and mechanism calls
 
-## Configuration
+## Setup
 
-Experiments are configured using a dictionary structure:
+1. Clone the repository:
+```bash
+git clone [repository-url]
+cd [repository-name]
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Create a config.py file with your OpenAI API settings:
+```python
+OPENAI_API_KEY = "your-api-key"
+OPENAI_MODEL = "gpt-4"  # or your preferred model
+MAX_TOKENS = 4000
+```
+
+## Project Structure
+
+```
+.
+├── async_llm_test.py     # Main experiment runner
+├── api_utils.py          # API handling utilities
+├── config.py            # Configuration settings
+├── data/               # Data directory
+│   └── ...            # Generated datasets
+└── README.md
+```
+
+## Core Components
+
+### ExperimentOracle Class
+Manages experiment configuration and execution. Supports two modes:
+- Synthetic: Uses predefined distributions for testing
+- LLM: Uses actual LLM calls for evaluation
+
+### API Utilities
+Handles all LLM API interactions with:
+- Asynchronous processing
+- Rate limiting
+- Usage tracking
+- Error handling
+
+### Evaluation Mechanisms
+Implements two types of evaluators:
+1. Critics: Assess information gain between responses
+2. Judges: Perform pairwise comparisons of response quality
+
+## Usage
+
+### Basic Example
 
 ```python
+import asyncio
+from async_llm_test import ExperimentOracle
+
+# Define experiment configuration
 exp_config = {
-    "exp_type": "llm" | "synthetic",  # Type of experiment
-    "num_agents": int,                # Number of agents (3 for synthetic)
+    "exp_type": "llm",
+    "num_agents": 3,
     "model_config": {
-        "model_name": str,            # Name of LLM model
-        "max_tokens": int,            # Max tokens per response
-        "temperature": float,         # Temperature for generation
+        "model_name": "gpt-4",
+        "max_tokens": 4000,
+        "temperature": 1.0
     },
-    "agent_perspectives": [           # List of agent configurations
-        {
-            "reading": str | None,    # Reading transformation
-            "strategy": str | None,   # Response strategy
-        },
-        ...
+    "task_description": "Abstract review task",
+    "agent_perspectives": [
+        {"strategy": "Please review the following abstract in three sentences."},
+        {"strategy": "Please review the following abstract in three sentences."},
+        {"strategy": None}  # Null model
     ],
-    "task_description": str,          # Description of the task
     "data_config": {
-        "data_path": str,             # Path to input data
-        "n_tasks": int,               # Number of tasks
-        "preload": bool,              # Whether to use preloaded data
-        "preload_path": str | None    # Path to preloaded data
+        "n_tasks": 50,
+        "preload": False
+    }
+}
+
+# Create oracle and run experiment
+async def run_experiment():
+    oracle = ExperimentOracle(exp_config)
+    await oracle.experiment()
+
+if __name__ == "__main__":
+    asyncio.run(run_experiment())
+```
+
+### Running Tests
+
+```bash
+python async_llm_test.py
+```
+
+## Output Format
+
+The experiment generates two types of files:
+
+1. Dataset Files (`*_data.json`):
+```json
+{
+    "task_description": "...",
+    "agent_perspectives": [...],
+    "tasks": [
+        {
+            "context": "...",
+            "responses": [...]
+        }
+    ],
+    "metadata": {
+        "model_config": {...},
+        "data_config": {...},
+        "generation_time": "..."
     }
 }
 ```
 
-## Key Components
-
-1. `ExperimentOracle`: Main class that handles experiment configuration and execution
-2. Async Data Generation: Uses `asyncio` for efficient API calls
-3. Data Saving: Automatic saving of experiment data and results
-4. Metrics: Calculates TVD-MI scores and judge evaluations
-
-## Usage
-
-Basic usage:
-
-```python
-async def main():
-    # Define experiment configuration
-    exp_config = {...}  # Set configuration parameters
-    
-    # Create oracle
-    oracle = ExperimentOracle(exp_config)
-    
-    # Run experiment
-    all_comparisons = await experiment(oracle)
-    
-    # Results are automatically saved to data directory
+2. Results Files (`*_results.json`):
+```json
+{
+    "task_description": "...",
+    "agent_perspectives": [...],
+    "comparisons": [
+        {
+            "agent_pair": [i, j],
+            "comparison_type": "critic|judge",
+            "result": 0|1,
+            "x": "...",
+            "y": "...",
+            "prompt": "..."
+        }
+    ]
+}
 ```
 
-## File Structure
+## Statistics Tracking
 
-- `async_llm_test.py`: Main implementation file
-- `data/`: Directory for experiment data and results
-  - Input data files
-  - Generated experiment results
-  - Debug output
+The framework tracks:
+- API calls and token usage
+- Mechanism calls (critic and judge)
+- Execution time and costs
 
-## Requirements
+Access statistics programmatically:
+```python
+from api_utils import get_api_stats, get_mechanism_stats
 
-- Python 3.12+
-- OpenAI API access
-- Required packages: numpy, asyncio, tiktoken
+api_stats = get_api_stats()
+mechanism_stats = get_mechanism_stats()
+```
 
-## Notes
+## Contributing
 
-- Synthetic mode currently only supports 3 agents
-- LLM mode supports configurable number of agents
-- All API calls are asynchronous for better performance
-- Results are automatically saved with timestamps
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request

@@ -747,7 +747,7 @@ async def main_async():
         ],
         "data_config": {
             "n_tasks": 10,
-            "preload": False,
+            "preload": True,
             "preload_path": "data/llm_experiment_data_20241107_114841.json"
         }
     }
