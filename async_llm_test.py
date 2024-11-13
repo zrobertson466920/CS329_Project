@@ -254,6 +254,26 @@ class ExperimentOracle:
                 string_data.append({"context": contexts[i], "responses": responses})
             return string_data
 
+    async def get_critic(self, index_pair, x, y):
+        if self.exp_type == "synthetic":
+            score = self.preset_critic(index_pair, x, y)
+            return score, "synthetic critic", {"type": "synthetic"}
+        elif self.exp_type == "llm":
+            return await self.llm_critic(x, y)
+        else:
+            score = self.simple_critic(index_pair, x, y)
+            return score, "simple critic", {"type": "simple"}
+
+    async def get_judge(self, x, y):
+        if self.exp_type == "synthetic":
+            score = self.preset_judge(x, y)
+            return score, "synthetic judge", {"type": "synthetic"}
+        elif self.exp_type == "llm":
+            return await self.llm_judge(x, y)
+        else:
+            score = self.simple_judge(x, y)
+            return score, "simple judge", {"type": "simple"}
+
     def preset_critic(self, index_pair, x, y):
         """
         Static critic using preset rules for testing without API calls.
@@ -283,39 +303,34 @@ class ExperimentOracle:
 
     def simple_critic(self, index_pair, x, y):
         """
-        Basic text-based judge using length comparison.
-        Used as fallback when API calls fail or for testing.
+        Binary critic function that returns 1 if responses are dependent, 0 if independent.
         """
         if x == "This abstract discusses important research findings. The methodology appears sound. Further investigation may be warranted.":
             return 0
         elif y == "This abstract discusses important research findings. The methodology appears sound. Further investigation may be warranted.":
-            return 1
+            return 0
 
         # Define a list of common stop words to ignore
         stop_words = set(['a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'])
-        
-        # Function to extract keywords from text
+
         def extract_keywords(text):
-            # Convert to lowercase and split into words
             words = re.findall(r'\w+', text.lower())
-            # Remove stop words and keep words with length > 2
             return set(word for word in words if word not in stop_words and len(word) > 2)
-        
-        # Extract keywords from both texts
+
         x_keywords = extract_keywords(x)
         y_keywords = extract_keywords(y)
-        
+
         # Calculate overlap
         overlap = len(x_keywords.intersection(y_keywords))
         total_keywords = len(x_keywords.union(y_keywords))
-        
+
         # Calculate overlap ratio
         overlap_ratio = overlap / total_keywords if total_keywords > 0 else 0
-        
+
         # Define threshold (you can adjust this value)
         threshold = 0.1
-        
-        # Return 1 if overlap ratio is above threshold, 0 otherwise
+
+        # Return 1 if overlap ratio is above threshold (dependent), 0 otherwise (independent)
         return 1 if overlap_ratio > threshold else 0
 
     def simple_judge(self, x, y):
@@ -328,6 +343,48 @@ class ExperimentOracle:
 
         increment_judge_calls()  # Changed from global variable
         return int(x_len > y_len)
+
+    async def llm_critic(self, response_a: str, response_b: str) -> tuple[float, str, dict]:
+        """
+        LLM-based critic that evaluates information gain between responses.
+        Returns (score, raw_response, metadata)
+        """
+        increment_f_calls()
+        prompt = generate_tvd_mi_prompt(self.task_description, response_a, response_b)
+
+        response, metadata = await generate_completion_async(
+            prompt=prompt,
+            temperature=0.3
+        )
+
+        if response:
+            score = interpret_tvd_mi_response(response)
+            return score, response, metadata
+        else:
+            # Fallback to simple critic
+            simple_score = self.simple_critic(None, response_a, response_b)
+            return simple_score, "API call failed - using simple critic", metadata
+
+    async def llm_judge(self, response_a: str, response_b: str) -> tuple[float, str, dict]:
+        """
+        LLM-based judge that compares response quality.
+        Returns (score, raw_response, metadata)
+        """
+        increment_judge_calls()
+        prompt = generate_judge_prompt(self.task_description, response_a, response_b)
+
+        response, metadata = await generate_completion_async(
+            prompt=prompt,
+            temperature=0.3
+        )
+
+        if response:
+            score = interpret_judge_response(response)
+            return score, response, metadata
+        else:
+            # Fallback to simple judge
+            simple_score = self.simple_judge(response_a, response_b)
+            return simple_score, "API call failed - using simple judge", metadata
 
     def get_num_agents(self):
         return self.num_agents
@@ -485,52 +542,64 @@ def llm_approximation(data, f):
     return p_comparisons + q_comparisons
 
 
-def calculate_agent_scores(data, oracle):
-    """
-    Calculate scores for all agent pairs using critic and judge functions.
-    """
+async def calculate_agent_scores(data, oracle):
     num_agents = oracle.get_num_agents()
     all_comparisons = []
 
     for i in range(num_agents):
-        print(f"Scoring Agent {i+1}")
         for j in range(num_agents):
             if i != j:
-                # Select appropriate scoring functions
-                if oracle.exp_type == "synthetic":
-                    critic_fn = lambda x, y: oracle.preset_critic((i, j), x, y)
-                    judge_fn = lambda x, y: oracle.preset_judge(x, y)
-                else:  # llm mode
-                    critic_fn = lambda x, y: oracle.simple_critic((i, j), x, y)
-                    judge_fn = lambda x, y: oracle.simple_judge(x, y)
+                # Get data pairs for both distributions
+                p_data = [(d["responses"][i], d["responses"][j]) for d in data]  # Original pairs
 
-                # Extract response pairs for comparison
-                pairwise_data = [(d["responses"][i], d["responses"][j]) for d in data]
+                # Create shuffled pairs for q distribution
+                shuffled_responses_j = [d["responses"][j] for d in data]
+                random.shuffle(shuffled_responses_j)
+                q_data = list(zip([d["responses"][i] for d in data], shuffled_responses_j))
 
-                # Get critic comparisons
-                comparisons = llm_approximation(pairwise_data, critic_fn)
-                for comp in comparisons:
-                    comp["agent_pair"] = (i + 1, j + 1)
-                    comp["comparison_type"] = "critic"
-                    comp["prompt"] = generate_tvd_mi_prompt(
-                        oracle.task_description, comp["x"], comp["y"]
-                    )
-                all_comparisons.extend(comparisons)
+                async def process_batch(batch, is_critic=True, distribution=None):
+                    results = []
+                    for x, y in batch:
+                        if is_critic:
+                            result, raw_response, metadata = await oracle.get_critic((i, j), x, y)
+                            comparison_type = "critic"
+                            prompt = generate_tvd_mi_prompt(oracle.task_description, x, y)
+                        else:
+                            result, raw_response, metadata = await oracle.get_judge(x, y)
+                            comparison_type = "judge"
+                            prompt = generate_judge_prompt(oracle.task_description, x, y)
 
-                # Get judge comparisons
-                judge_comparisons = [
-                    {
-                        "agent_pair": (i + 1, j + 1),
-                        "result": judge_fn(x, y),
-                        "x": x,
-                        "y": y,
-                        "comparison_type": "judge",
-                        "prompt": generate_judge_prompt(oracle.task_description, x, y),
-                    }
-                    for x, y in pairwise_data
-                ]
-                all_comparisons.extend(judge_comparisons)
-                increment_judge_calls(len(pairwise_data))
+                        results.append({
+                            "agent_pair": (i + 1, j + 1),
+                            "result": result,
+                            "x": x,
+                            "y": y,
+                            "comparison_type": comparison_type,
+                            "prompt": prompt,
+                            "distribution": distribution,
+                            "raw_response": raw_response,
+                            "metadata": metadata
+                        })
+                    return results
+
+                batch_size = 5
+                # Process p distribution for critic
+                for k in range(0, len(p_data), batch_size):
+                    p_batch = p_data[k:k + batch_size]
+                    critic_p_results = await process_batch(p_batch, is_critic=True, distribution="p")
+                    all_comparisons.extend(critic_p_results)
+
+                # Process q distribution for critic
+                for k in range(0, len(q_data), batch_size):
+                    q_batch = q_data[k:k + batch_size]
+                    critic_q_results = await process_batch(q_batch, is_critic=True, distribution="q")
+                    all_comparisons.extend(critic_q_results)
+
+                # Process judge (no distribution needed)
+                for k in range(0, len(p_data), batch_size):
+                    judge_batch = p_data[k:k + batch_size]
+                    judge_results = await process_batch(judge_batch, is_critic=False, distribution=None)
+                    all_comparisons.extend(judge_results)
 
     return all_comparisons
 
@@ -618,13 +687,14 @@ def calculate_total_calls(num_agents, n_tasks):
 
 def calculate_empirical_tvd_mi(all_comparisons, num_agents):
     """
-    Calculate the empirical TVD-MI matrix from individual comparisons.
+    Calculate the empirical TVD-MI matrix using the binary critic function results.
     """
     empirical_tvd_mi = np.zeros((num_agents, num_agents))
 
     for i in range(1, num_agents + 1):
         for j in range(1, num_agents + 1):
             if i != j:
+                # Get all critic results for this pair
                 p_results = [
                     comp["result"]
                     for comp in all_comparisons
@@ -641,9 +711,12 @@ def calculate_empirical_tvd_mi(all_comparisons, num_agents):
                 ]
 
                 if p_results and q_results:
-                    empirical_tvd_mi[i - 1][j - 1] = np.mean(p_results) - np.mean(
-                        q_results
-                    )
+                    # Calculate means of binary results
+                    p_mean = np.mean(p_results)  # P(f(X,Y)=1)
+                    q_mean = np.mean(q_results)  # P(f(X',Y)=1)
+
+                    # TVD-MI lower bound is difference between these probabilities
+                    empirical_tvd_mi[i - 1][j - 1] = p_mean - q_mean
 
     return empirical_tvd_mi
 
@@ -710,9 +783,9 @@ async def experiment(oracle, n_tasks = None):
     )
     print(f"Generated data saved to {data_filename}")
 
-    # Calculate scores
+    # Calculate scores - Add await here
     print("\nScoring Mechanism")
-    all_comparisons = calculate_agent_scores(responses, oracle)
+    all_comparisons = await calculate_agent_scores(responses, oracle)  # Added await
 
     # Save scoring results
     results_filename = f"{base_filename}_results.json"
@@ -732,7 +805,7 @@ async def main_async():
     """
     # Define experiment configuration
     exp_config = {
-        "exp_type": "llm",
+        "exp_type": "simple",
         "num_agents": 3,
         "model_config": {
             "model_name": OPENAI_MODEL,
@@ -742,7 +815,7 @@ async def main_async():
         "task_description": "The following are abstract reviews.",
         "agent_perspectives": [
             {"reading": None, "strategy": "Please review the following abstract in three sentences."},
-            {"reading": None, "strategy": "Please review the following abstract in three sentences."},
+            {"reading": None, "strategy": "Please review the following abstract in two sentences."},
             {"reading": None, "strategy": None}  # Null model
         ],
         "data_config": {
