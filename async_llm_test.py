@@ -62,23 +62,14 @@ class ExperimentOracle:
         # Required parameters
         self.exp_type = exp_config["exp_type"]
         self.num_agents = exp_config["num_agents"]
+        self.task_description = exp_config["task_description"]
+        self.data_config = exp_config["data_config"]
 
         # Optional parameters with defaults
         self.model_config = exp_config.get("model_config", {
             "model_name": "gpt-4o-mini",
             "max_tokens": 4000,
             "temperature": 1.0
-        })
-
-        self.task_description = exp_config.get("task_description", 
-            "The following are abstract reviews."
-        )
-
-        self.data_config = exp_config.get("data_config", {
-            "data_path": "data/extracted_data_abstract_title.json",
-            "n_tasks": 10,
-            "preload": False,
-            "preload_path": None
         })
 
         # Handle synthetic case
@@ -266,10 +257,10 @@ class ExperimentOracle:
                 string_data.append({"context": contexts[i], "responses": responses})
             return string_data
 
-    def optimal_critic(self, index_pair, x, y):
+    def preset_critic(self, index_pair, x, y):
         """
-        Implement the optimal critic function.
-        Translates string responses back to binary before computation.
+        Static critic using preset rules for testing without API calls.
+        Used when exp_type is synthetic.
         """
         x_bin = interpret_response_back(x)
         y_bin = interpret_response_back(y)
@@ -282,16 +273,10 @@ class ExperimentOracle:
             pairwise_joint[x_bin, y_bin] > p_marginal_1[x_bin] * p_marginal_2[y_bin]
         )
 
-    def optimal_judge(self, x, y):
+    def preset_judge(self, x, y):
         """
-        Simulate an LLM judge for pairwise ranking.
-        Returns 1 if x is preferred, 0 if y is preferred.
-        Translates string responses back to binary before computation.
-
-        Currently implemented as a dummy pass.
-
-        To implement:
-            - Replace the dummy logic with actual LLM-based judgment
+        Static judge using preset rules for testing without API calls.
+        Used when exp_type is synthetic.
         """
         x_bin = interpret_response_back(x)
         y_bin = interpret_response_back(y)
@@ -301,11 +286,10 @@ class ExperimentOracle:
         # Dummy logic: prefer 'like' over 'dislike'
         return int(x_bin > y_bin)
 
-    def llm_critic(self, index_pair, x, y):
+    def simple_critic(self, index_pair, x, y):
         """
-        Dummy placeholder
-        Implement the optimal critic function.
-        Translates string responses back to binary before computation.
+        Basic text-based judge using length comparison.
+        Used as fallback when API calls fail or for testing.
         """
         if x == "This abstract discusses important research findings. The methodology appears sound. Further investigation may be warranted.":
             return 0
@@ -339,17 +323,10 @@ class ExperimentOracle:
         # Return 1 if overlap ratio is above threshold, 0 otherwise
         return 1 if overlap_ratio > threshold else 0
 
-    def llm_judge(self, x, y):
+    def simple_judge(self, x, y):
         """
-        Dummy placeholder
-        Simulate an LLM judge for pairwise ranking.
-        Returns 1 if x is preferred, 0 if y is preferred.
-        Translates string responses back to binary before computation.
-
-        Currently implemented as a dummy pass.
-
-        To implement:
-            - Replace the dummy logic with actual LLM-based judgment
+        Basic text-based judge using length comparison.
+        Used as fallback when API calls fail or for testing.
         """
         x_bin = len(x)
         y_bin = len(y)
@@ -573,60 +550,60 @@ def llm_approximation(data, f):
 
 
 def calculate_agent_scores(data, oracle):
+    """
+    Calculate scores for all agent pairs using critic and judge functions.
+
+    Args:
+        data: List of dictionaries containing context and agent responses
+        oracle: ExperimentOracle instance with scoring methods
+
+    Returns:
+        List of all comparison results with metadata
+    """
     num_agents = oracle.get_num_agents()
-    all_comparisons = []  # List to hold all comparisons
+    all_comparisons = []
 
     for i in range(num_agents):
         print(f"Scoring Agent {i+1}")
         for j in range(num_agents):
             if i != j:
-                # Define critic function that handles string data
+                # Select appropriate scoring functions
                 if oracle.exp_type == "synthetic":
-                    f = lambda x, y: oracle.optimal_critic((i, j), x, y)
-                elif oracle.exp_type == "llm":
-                    f = lambda x, y: oracle.llm_critic((i, j), x, y)
+                    critic_fn = lambda x, y: oracle.preset_critic((i, j), x, y)
+                    judge_fn = lambda x, y: oracle.preset_judge(x, y)
+                else:  # llm mode
+                    critic_fn = lambda x, y: oracle.simple_critic((i, j), x, y)
+                    judge_fn = lambda x, y: oracle.simple_judge(x, y)
 
-                # Extract string responses for agent i and j
+                # Extract response pairs for comparison
                 pairwise_data = [(d["responses"][i], d["responses"][j]) for d in data]
 
-                # Calculate TVD-MI score using approximation and get individual comparisons
-                comparisons = llm_approximation(pairwise_data, f)
-
-                # Add agent pair information and prompt to each comparison
+                # Get critic comparisons
+                comparisons = llm_approximation(pairwise_data, critic_fn)
                 for comp in comparisons:
-                    comp["agent_pair"] = (i + 1, j + 1)  # Agents are 1-indexed
+                    comp["agent_pair"] = (i + 1, j + 1)
                     comp["comparison_type"] = "critic"
                     comp["prompt"] = generate_tvd_mi_prompt(
                         oracle.task_description, comp["x"], comp["y"]
                     )
-
                 all_comparisons.extend(comparisons)
 
-                # Calculate LLM judge scores
-                if oracle.exp_type == "synthetic":
-                    f_judge = lambda x, y: oracle.optimal_judge(x, y)
-                elif oracle.exp_type == "llm":
-                    f_judge = lambda x, y: oracle.llm_judge(x, y)
-
-                judge_comparisons = []
-                for idx, (x, y) in enumerate(pairwise_data):
-                    result = f_judge(x, y)
-                    judge_comparisons.append(
-                        {
-                            "agent_pair": (i + 1, j + 1),
-                            "result": result,
-                            "x": x,
-                            "y": y,
-                            "comparison_type": "judge",
-                            "prompt": generate_judge_prompt(oracle.task_description, x, y),
-                        }
-                    )
-
+                # Get judge comparisons
+                judge_comparisons = [
+                    {
+                        "agent_pair": (i + 1, j + 1),
+                        "result": judge_fn(x, y),
+                        "x": x,
+                        "y": y,
+                        "comparison_type": "judge",
+                        "prompt": generate_judge_prompt(oracle.task_description, x, y),
+                    }
+                    for x, y in pairwise_data
+                ]
                 all_comparisons.extend(judge_comparisons)
                 global judge_calls
                 judge_calls += len(pairwise_data)
 
-    print()
     return all_comparisons
 
 def save_experiment_dataset(
@@ -760,13 +737,14 @@ def print_matrix(matrix, title):
 
 async def experiment(oracle, n_tasks = None):
     """
-    Run the experiment with enhanced data saving.
+    Run the experiment with data saved after generation to preserve results.
     """
-
     if n_tasks is None:
         n_tasks = oracle.data_config["n_tasks"]
 
     start_time = datetime.now()
+    base_filename = f"data/{oracle.exp_type}_{start_time:%Y%m%d_%H%M%S}"
+
     metadata = {
         "experiment_type": oracle.exp_type,
         "n_tasks": n_tasks,
@@ -784,6 +762,7 @@ async def experiment(oracle, n_tasks = None):
         }
     }
 
+    # Generate data
     if oracle.exp_type == "synthetic":
         true_tvd_mi_matrix = oracle.calculate_true_tvd_mi_matrix()
         print_matrix(true_tvd_mi_matrix, "True TVD-MI Scores")
@@ -792,37 +771,30 @@ async def experiment(oracle, n_tasks = None):
         print("Generating Data\n")
         contexts, perspectives, responses = await oracle.generate_llm_data(n_tasks)
 
-    print("Scoring Mechanism\n")
-    all_comparisons = calculate_agent_scores(responses, oracle)
-
-    # Update metadata with final statistics
-    end_time = datetime.now()
-    metadata.update({
-        "end_time": end_time.isoformat(),
-        "duration_seconds": (end_time - start_time).total_seconds(),
-        "f_calls": f_calls,
-        "judge_calls": judge_calls,
-        "token_usage": {
-            "total_tokens": tokens,
-            "completion_tokens": config_tokens,
-        }
-    })
-
-    # Save both the dataset and results
+    # Save generated data immediately
+    data_filename = f"{base_filename}_data.json"
     save_experiment_dataset(
         tasks=responses,
         task_description=oracle.task_description,
         agent_perspectives=perspectives,
-        filename=f"data/{oracle.exp_type}_experiment_data_{start_time:%Y%m%d_%H%M%S}.json",
+        filename=data_filename,
         metadata=metadata
     )
+    print(f"Generated data saved to {data_filename}")
 
+    # Calculate scores
+    print("\nScoring Mechanism")
+    all_comparisons = calculate_agent_scores(responses, oracle)
+
+    # Save scoring results
+    results_filename = f"{base_filename}_results.json"
     save_experiment_results(
         task_description=oracle.task_description,
         agent_perspectives=perspectives,
         all_comparisons=all_comparisons,
-        filename=f"data/{oracle.exp_type}_experiment_results_{start_time:%Y%m%d_%H%M%S}.json"
+        filename=results_filename,
     )
+    print(f"Results saved to {results_filename}")
 
     return all_comparisons
 
@@ -839,14 +811,16 @@ async def main_async():
             "max_tokens": MAX_TOKENS,
             "temperature": 1.0
         },
+        "task_description": "The following are abstract reviews.",
         "agent_perspectives": [
             {"reading": None, "strategy": "Please review the following abstract in three sentences."},
             {"reading": None, "strategy": "Please review the following abstract in three sentences."},
             {"reading": None, "strategy": None}  # Null model
         ],
         "data_config": {
-            "n_tasks": 10,
-            "preload": False
+            "n_tasks": 50,
+            "preload": True,
+            "preload_path": "data/llm_experiment_data_20241107_114841.json"
         }
     }
 
