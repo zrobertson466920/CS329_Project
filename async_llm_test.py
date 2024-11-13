@@ -1,4 +1,3 @@
-#import asyncio
 import numpy as np
 from itertools import product
 import random
@@ -7,26 +6,24 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import re
 import asyncio
-from openai import AsyncOpenAI
-import tiktoken
+
+from api_utils import (
+    generate_completion_async,
+    generate_batch_completions_async,
+    count_tokens,
+    get_api_stats,
+    reset_api_stats,
+    increment_f_calls,
+    increment_judge_calls,  # Make sure this is imported
+    get_mechanism_stats
+)
+
 
 try:
     from config import OPENAI_API_KEY, OPENAI_MODEL, MAX_TOKENS
 except ImportError:
     print("Please create a config.py file with your API key and settings")
     raise
-
-# Initialize OpenAI Async Client
-client = AsyncOpenAI(
-    api_key=OPENAI_API_KEY,
-)
-
-# Global request tracking
-config_calls = 0
-f_calls = 0
-judge_calls = 0
-config_tokens = 0
-tokens = 0
 
 
 class ExperimentOracle:
@@ -281,9 +278,7 @@ class ExperimentOracle:
         x_bin = interpret_response_back(x)
         y_bin = interpret_response_back(y)
 
-        global judge_calls
-        judge_calls += 2
-        # Dummy logic: prefer 'like' over 'dislike'
+        increment_judge_calls()  # Changed from global variable
         return int(x_bin > y_bin)
 
     def simple_critic(self, index_pair, x, y):
@@ -328,13 +323,11 @@ class ExperimentOracle:
         Basic text-based judge using length comparison.
         Used as fallback when API calls fail or for testing.
         """
-        x_bin = len(x)
-        y_bin = len(y)
+        x_len = len(x)
+        y_len = len(y)
 
-        global judge_calls
-        judge_calls += 1
-        # Dummy logic: prefer 'like' over 'dislike'
-        return int(x_bin > y_bin)
+        increment_judge_calls()  # Changed from global variable
+        return int(x_len > y_len)
 
     def get_num_agents(self):
         return self.num_agents
@@ -367,62 +360,6 @@ class ExperimentOracle:
         )
         return pairwise_joint / pairwise_joint.sum()  # Normalize
 
-## API
-
-def count_tokens(text: str, model = 'gpt-4o-mini') -> int:
-    model = 'gpt-4o-mini'
-    """
-    Counts the number of tokens in the given text for the specified model.
-
-    Args:
-        text (str): The text to count tokens for.
-        model (str): The OpenAI model name.
-
-    Returns:
-        int: The number of tokens.
-    """
-    encoding = tiktoken.encoding_for_model(model)
-
-    return len(encoding.encode(text))
-
-async def generate_completion_async(prompt: str, model_name: str, max_tokens: int) -> Tuple[Optional[str], int]:
-    """
-    Asynchronously generates a completion using OpenAI's Chat Completions API.
-
-    Args:
-        prompt (str): The prompt to send to the model.
-        model_name (str): The name of the OpenAI model to use.
-        max_tokens (int): The maximum number of tokens to generate.
-
-    Returns:
-        Tuple[Optional[str], int]: A tuple containing the generated completion text (or None if an error occurs) and the number of tokens used in this call.
-    """
-    try:
-        # Count tokens in the prompt
-        token_count_prompt = count_tokens(prompt, model_name)
-
-        # Create the chat completion asynchronously
-        response = await client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=1.0,
-        )
-
-        # Extract the assistant's reply
-        assistant_message = response.choices[0].message.content
-
-        # Count tokens in the response
-        token_count_response = count_tokens(assistant_message, model_name)
-
-        # Calculate total tokens for this call
-        tokens_used = token_count_prompt + token_count_response
-
-        return assistant_message, tokens_used
-
-    except Exception as e:
-        print(f"Error generating completion: {str(e)}")
-        return None, 0
 
 ## Mechanisms
 
@@ -525,7 +462,6 @@ def llm_approximation(data, f):
     Approximate TVD-MI using the LLM method for a pair of agents with subsampling.
     Now returns individual comparisons with pair information.
     """
-    global f_calls
     t = len(data)
     p_comparisons = []
     q_comparisons = []
@@ -534,7 +470,7 @@ def llm_approximation(data, f):
     for x, y in data:
         result = f(x, y)
         p_comparisons.append({"result": result, "distribution": "p", "x": x, "y": y})
-    f_calls += t
+    increment_f_calls(t)
 
     # q distribution (subsample t pairs instead of t*t)
     shuffled_pairs = list(product(*zip(*data)))
@@ -544,7 +480,7 @@ def llm_approximation(data, f):
     for x, y in subsampled_pairs:
         result = f(x, y)
         q_comparisons.append({"result": result, "distribution": "q", "x": x, "y": y})
-    f_calls += t
+    increment_f_calls(t)
 
     return p_comparisons + q_comparisons
 
@@ -552,13 +488,6 @@ def llm_approximation(data, f):
 def calculate_agent_scores(data, oracle):
     """
     Calculate scores for all agent pairs using critic and judge functions.
-
-    Args:
-        data: List of dictionaries containing context and agent responses
-        oracle: ExperimentOracle instance with scoring methods
-
-    Returns:
-        List of all comparison results with metadata
     """
     num_agents = oracle.get_num_agents()
     all_comparisons = []
@@ -601,8 +530,7 @@ def calculate_agent_scores(data, oracle):
                     for x, y in pairwise_data
                 ]
                 all_comparisons.extend(judge_comparisons)
-                global judge_calls
-                judge_calls += len(pairwise_data)
+                increment_judge_calls(len(pairwise_data))
 
     return all_comparisons
 
@@ -818,8 +746,8 @@ async def main_async():
             {"reading": None, "strategy": None}  # Null model
         ],
         "data_config": {
-            "n_tasks": 50,
-            "preload": True,
+            "n_tasks": 10,
+            "preload": False,
             "preload_path": "data/llm_experiment_data_20241107_114841.json"
         }
     }
@@ -884,10 +812,15 @@ async def main_async():
         )
     print()
 
-    # Print the actual number of calls made during the experiment
-    print(f"\nActual f calls: {f_calls}")
-    print(f"Actual judge calls: {judge_calls}")
-    print(f"Total actual oracle calls: {f_calls + judge_calls}")
+    print("\nMechanism Call Statistics:")
+    print(f"  f_calls: {get_mechanism_stats()['f_calls']}")
+    print(f"  judge_calls: {get_mechanism_stats()['judge_calls']}")
+    print(f"  Total mechanism calls: {get_mechanism_stats()['f_calls'] + get_mechanism_stats()['judge_calls']}")
+
+    print("\nAPI Statistics:")
+    print(f"  Total API calls: {get_api_stats()['calls']}")
+    print(f"  Total tokens: {get_api_stats()['tokens']['total']}")
+    print(f"  Duration: {get_api_stats()['duration']:.2f} seconds")
 
 def main():
     """
