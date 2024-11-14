@@ -546,62 +546,87 @@ async def calculate_agent_scores(data, oracle):
     num_agents = oracle.get_num_agents()
     all_comparisons = []
 
+    # Increase batch size significantly
+    BATCH_SIZE = 500  # 10x increase
+
+    # Create all comparison tasks upfront
+    comparison_tasks = []
     for i in range(num_agents):
         for j in range(num_agents):
             if i != j:
-                # Get data pairs for both distributions
-                p_data = [(d["responses"][i], d["responses"][j]) for d in data]  # Original pairs
+                # Get data pairs
+                p_data = [(d["responses"][i], d["responses"][j]) for d in data]
 
-                # Create shuffled pairs for q distribution
+                # Create shuffled q distribution
                 shuffled_responses_j = [d["responses"][j] for d in data]
                 random.shuffle(shuffled_responses_j)
                 q_data = list(zip([d["responses"][i] for d in data], shuffled_responses_j))
 
-                async def process_batch(batch, is_critic=True, distribution=None):
-                    results = []
-                    for x, y in batch:
-                        if is_critic:
-                            result, raw_response, metadata = await oracle.get_critic((i, j), x, y)
-                            comparison_type = "critic"
-                            prompt = generate_tvd_mi_prompt(oracle.task_description, x, y)
-                        else:
-                            result, raw_response, metadata = await oracle.get_judge(x, y)
-                            comparison_type = "judge"
-                            prompt = generate_judge_prompt(oracle.task_description, x, y)
+                # Add all tasks to queue
+                for x, y in p_data:
+                    comparison_tasks.append({
+                        "pair": (i, j),
+                        "x": x,
+                        "y": y,
+                        "type": "critic",
+                        "distribution": "p"
+                    })
+                for x, y in q_data:
+                    comparison_tasks.append({
+                        "pair": (i, j),
+                        "x": x,
+                        "y": y, 
+                        "type": "critic",
+                        "distribution": "q"
+                    })
+                for x, y in p_data:
+                    comparison_tasks.append({
+                        "pair": (i, j),
+                        "x": x,
+                        "y": y,
+                        "type": "judge",
+                        "distribution": None
+                    })
 
-                        results.append({
-                            "agent_pair": (i + 1, j + 1),
-                            "result": result,
-                            "x": x,
-                            "y": y,
-                            "comparison_type": comparison_type,
-                            "prompt": prompt,
-                            "distribution": distribution,
-                            "raw_response": raw_response,
-                            "metadata": metadata
-                        })
-                    return results
+    # Process in larger batches with rate limiting
+    for i in range(0, len(comparison_tasks), BATCH_SIZE):
+        batch = comparison_tasks[i:i + BATCH_SIZE]
 
-                batch_size = 5
-                # Process p distribution for critic
-                for k in range(0, len(p_data), batch_size):
-                    p_batch = p_data[k:k + batch_size]
-                    critic_p_results = await process_batch(p_batch, is_critic=True, distribution="p")
-                    all_comparisons.extend(critic_p_results)
+        # Process batch concurrently
+        results = await asyncio.gather(*[
+            process_single_comparison(task, oracle)
+            for task in batch
+        ])
 
-                # Process q distribution for critic
-                for k in range(0, len(q_data), batch_size):
-                    q_batch = q_data[k:k + batch_size]
-                    critic_q_results = await process_batch(q_batch, is_critic=True, distribution="q")
-                    all_comparisons.extend(critic_q_results)
-
-                # Process judge (no distribution needed)
-                for k in range(0, len(p_data), batch_size):
-                    judge_batch = p_data[k:k + batch_size]
-                    judge_results = await process_batch(judge_batch, is_critic=False, distribution=None)
-                    all_comparisons.extend(judge_results)
+        all_comparisons.extend(results)
 
     return all_comparisons
+
+async def process_single_comparison(task, oracle):
+    """Process a single comparison task"""
+    i, j = task["pair"]
+    x, y = task["x"], task["y"]
+
+    if task["type"] == "critic":
+        result, raw_response, metadata = await oracle.get_critic((i, j), x, y)
+        prompt = generate_tvd_mi_prompt(oracle.task_description, x, y)
+        comparison_type = "critic"
+    else:
+        result, raw_response, metadata = await oracle.get_judge(x, y)
+        prompt = generate_judge_prompt(oracle.task_description, x, y)
+        comparison_type = "judge"
+
+    return {
+        "agent_pair": (i + 1, j + 1),
+        "result": result,
+        "x": x,
+        "y": y,
+        "comparison_type": comparison_type,
+        "prompt": prompt,
+        "distribution": task["distribution"],
+        "raw_response": raw_response,
+        "metadata": metadata
+    }
 
 def save_experiment_dataset(
     tasks: List[Dict[str, Any]], 
@@ -805,8 +830,8 @@ async def main_async():
     """
     # Define experiment configuration
     exp_config = {
-        "exp_type": "simple",
-        "num_agents": 3,
+        "exp_type": "llm",
+        "num_agents": 6,
         "model_config": {
             "model_name": OPENAI_MODEL,
             "max_tokens": MAX_TOKENS,
@@ -821,7 +846,7 @@ async def main_async():
         "data_config": {
             "n_tasks": 10,
             "preload": True,
-            "preload_path": "data/llm_experiment_data_20241107_114841.json"
+            "preload_path": "data/preload_llm_experiment_data.json"
         }
     }
 
