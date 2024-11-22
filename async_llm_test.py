@@ -824,6 +824,43 @@ async def experiment(oracle, n_tasks = None):
 
     return all_comparisons
 
+def calculate_correlations(tvd_mi_matrix, judge_matrix, mean_tvd_scores, mean_judge_scores):
+    """
+    Calculate correlations between TVD-MI and Judge scores.
+    Returns both matrix entry correlations and agent score correlations.
+    """
+    import scipy.stats as stats
+
+    # Flatten matrices excluding diagonals
+    tvd_flat = []
+    judge_flat = []
+    n = len(tvd_mi_matrix)
+
+    for i in range(n):
+        for j in range(n):
+            if i != j:  # Exclude diagonal
+                tvd_flat.append(tvd_mi_matrix[i][j])
+                judge_flat.append(judge_matrix[i][j])
+
+    # Calculate matrix correlations
+    pearson_matrix, p_val_matrix = stats.pearsonr(tvd_flat, judge_flat)
+    spearman_matrix, sp_val_matrix = stats.spearmanr(tvd_flat, judge_flat)
+
+    # Calculate agent score correlations
+    pearson_agents, p_val_agents = stats.pearsonr(mean_tvd_scores, mean_judge_scores)
+    spearman_agents, sp_val_agents = stats.spearmanr(mean_tvd_scores, mean_judge_scores)
+
+    return {
+        'matrix': {
+            'pearson': (pearson_matrix, p_val_matrix),
+            'spearman': (spearman_matrix, sp_val_matrix)
+        },
+        'agents': {
+            'pearson': (pearson_agents, p_val_agents),
+            'spearman': (spearman_agents, sp_val_agents)
+        }
+    }
+
 async def main_async():
     """
     Main function to run the experiment.
@@ -839,13 +876,34 @@ async def main_async():
         },
         "task_description": "The following are abstract reviews.",
         "agent_perspectives": [
-            {"reading": None, "strategy": "Please review the following abstract in three sentences."},
-            {"reading": None, "strategy": "Please review the following abstract in two sentences."},
-            {"reading": None, "strategy": None}  # Null model
+            {
+            "reading": None,
+            "strategy": "Please review the following abstract professionally."
+            },
+            {
+            "reading": None,
+            "strategy": "Please review the following abstract casually."
+            },
+            {
+            "reading": None,
+            "strategy": "Please review the following abstract in three sentences."
+            },
+            {
+            "reading": None,
+            "strategy": "Please review the following abstract in two sentences."
+            },
+            {
+            "reading": None,
+            "strategy": "Please review the following abstract in one sentence."
+            },
+            {
+            "reading": None,
+            "strategy": None
+            }
         ],
         "data_config": {
-            "n_tasks": 10,
-            "preload": True,
+            "n_tasks": 50,
+            "preload": False,
             "preload_path": "data/preload_llm_experiment_data.json"
         }
     }
@@ -908,6 +966,24 @@ async def main_async():
             f"  Agent {agent} - Total TVD-MI score: {mean_tvd_scores[agent-1]:.4f}, "
             f"Mean Judge score: {mean_judge_scores[agent-1]:.4f}"
         )
+    print()
+
+    # Add correlation analysis
+    correlations = calculate_correlations(
+        empirical_tvd_mi_matrix, 
+        judge_matrix,
+        mean_tvd_scores,
+        mean_judge_scores
+    )
+
+    print("\nCorrelation Analysis:")
+    print("Matrix Entry Correlations (excluding diagonals):")
+    print(f"  Pearson:  r = {correlations['matrix']['pearson'][0]:.4f} (p = {correlations['matrix']['pearson'][1]:.4f})")
+    print(f"  Spearman: ρ = {correlations['matrix']['spearman'][0]:.4f} (p = {correlations['matrix']['spearman'][1]:.4f})")
+
+    print("\nAgent Mean Score Correlations:")
+    print(f"  Pearson:  r = {correlations['agents']['pearson'][0]:.4f} (p = {correlations['agents']['pearson'][1]:.4f})")
+    print(f"  Spearman: ρ = {correlations['agents']['spearman'][0]:.4f} (p = {correlations['agents']['spearman'][1]:.4f})")
     print()
 
     print("\nMechanism Call Statistics:")
