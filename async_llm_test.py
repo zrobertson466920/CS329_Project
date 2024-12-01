@@ -423,17 +423,13 @@ class ExperimentOracle:
 
 def generate_judge_prompt(query: str, response_a: str, response_b: str) -> str:
     prompt = f"""[System]
-Please act as an impartial judge and evaluate the quality of the responses provided by two
-AI assistants to the user question displayed below. You should choose the assistant that
-follows the user’s instructions and answers the user’s question better. Your evaluation
-should consider factors such as the helpfulness, relevance, accuracy, depth, creativity,
-and level of detail of their responses. Begin your evaluation by comparing the two
-responses and provide a short explanation. Avoid any position biases and ensure that the
-order in which the responses were presented does not influence your decision. Do not allow
-the length of the responses to influence your evaluation. Do not favor certain names of
-the assistants. Be as objective as possible. After providing your explanation, output your
-final verdict by strictly following this format: "[[A]]" if assistant A is better, "[[B]]"
-if assistant B is better, and "[[C]]" for a tie.
+Please act as an impartial judge evaluating the COMPLETENESS of two responses to an academic abstract. Completeness refers to:
+1. Coverage of key findings and contributions
+2. Discussion of important methodology details
+3. Inclusion of relevant context and implications
+4. Addressing all major aspects of the research
+
+Base your evaluation ONLY on completeness, ignoring other aspects like style or precise accuracy.
 
 [User Question]
 {query}
@@ -445,9 +441,13 @@ if assistant B is better, and "[[C]]" for a tie.
 [The Start of Assistant B's Answer]
 {response_b}
 [The End of Assistant B's Answer]
+
+First, identify the key elements covered/missing in each response. Then provide a brief explanation focused on completeness. Finally, output your verdict using:
+"[[A]]" if Assistant A's response is more complete
+"[[B]]" if Assistant B's response is more complete
+"[[C]]" if both responses are equally complete/incomplete
 """
     return prompt
-
 
 def interpret_judge_response(response: str) -> float:
     if "[[A]]" in response:
@@ -903,7 +903,7 @@ async def main_async():
         ],
         "data_config": {
             "n_tasks": 50,
-            "preload": False,
+            "preload": True,
             "preload_path": "data/preload_llm_experiment_data.json"
         }
     }
