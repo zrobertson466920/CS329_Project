@@ -1,3 +1,9 @@
+## Papers
+
+- [Class Project: Scalable Oversight through Information-Theoretic Evaluation](./papers/CS329H_Scalable_Oversight.pdf)
+
+**Abstract:** This paper introduces a novel mechanism for scalable oversight, leveraging Total Variation Distance Mutual Information (TVD-MI) in a principal-agent framework. Our approach uniquely addresses the challenge of oversight with information asymmetry, where the principal lacks direct access to ground truth. Unlike classical methods requiring perfect probability estimates, our mechanism provides robust theoretical guarantees while remaining practically implementable. We prove that the mechanism is robust to specification gaming—neither principals nor agents gain significant utility from distorting their natural responses. We validate our theoretical results through comprehensive experiments in two high-stakes domains: scientific review and medical text assessment. Our experiments demonstrate that TVD-MI effectively detects strategic behavior in paper reviews and correlates more strongly with human agreement on correctness (0.110 ± 0.014) compared to LLM judges (0.020-0.035 ± 0.004). These results establish TVD-MI as a practical tool for scalable oversight while highlighting important limitations in current LLM-based evaluation approaches.
+
 # Information-Theoretic LLM Evaluation Framework
 
 This repository contains the implementation of an information-theoretic framework for evaluating Language Model (LLM) outputs, developed through two related works:
