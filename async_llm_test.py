@@ -1,4 +1,3 @@
-#import asyncio
 import numpy as np
 from itertools import product
 import random
@@ -7,26 +6,24 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import re
 import asyncio
-from openai import AsyncOpenAI
-import tiktoken
+
+from api_utils import (
+    generate_completion_async,
+    generate_batch_completions_async,
+    count_tokens,
+    get_api_stats,
+    reset_api_stats,
+    increment_f_calls,
+    increment_judge_calls,  # Make sure this is imported
+    get_mechanism_stats
+)
+
 
 try:
     from config import OPENAI_API_KEY, OPENAI_MODEL, MAX_TOKENS
 except ImportError:
     print("Please create a config.py file with your API key and settings")
     raise
-
-# Initialize OpenAI Async Client
-client = AsyncOpenAI(
-    api_key=OPENAI_API_KEY,
-)
-
-# Global request tracking
-config_calls = 0
-f_calls = 0
-judge_calls = 0
-config_tokens = 0
-tokens = 0
 
 
 class ExperimentOracle:
@@ -64,6 +61,9 @@ class ExperimentOracle:
         self.num_agents = exp_config["num_agents"]
         self.task_description = exp_config["task_description"]
         self.data_config = exp_config["data_config"]
+        self.preload_type = self.data_config.get("preload_type", "none")  # none, full, partial
+        if self.preload_type not in ["none", "full", "partial"]:
+            raise ValueError("Invalid preload_type. Must be 'none', 'full', or 'partial'")
 
         # Optional parameters with defaults
         self.model_config = exp_config.get("model_config", {
@@ -151,7 +151,9 @@ class ExperimentOracle:
         if preload is None:
             preload = self.data_config.get("preload", False)
 
-        if preload:
+        if self.preload_type == "partial":
+            return await self._generate_partial_data(n_tasks)
+        elif self.preload_type == "full":
             preload_path = self.data_config.get("preload_path", "data/preload_llm_experiment_data.json")
             print(f"Loading preloaded data from {preload_path}")
 
@@ -219,6 +221,84 @@ class ExperimentOracle:
 
         return contexts, self.agent_perspectives, tasks
 
+    async def _generate_partial_data(self, n_tasks):
+        """Handle partial preloading where first agent uses existing reviews."""
+        from tqdm.asyncio import tqdm
+        import time
+
+        # Load source data containing papers and their human reviews
+        data_path = self.data_config.get("data_path")
+        if not data_path:
+            raise ValueError("data_path required for partial preloading")
+
+        with open(data_path, "r") as f:
+            source_data = json.load(f)
+
+        # Extract contexts and human reviews 
+        contexts = [item['instruction'] for item in source_data[:n_tasks]]
+        human_reviews = [item['reference'] for item in source_data[:n_tasks]]
+
+        # Initialize tasks with human reviews as first agent
+        tasks = [
+            {
+                "context": context,
+                "responses": [review] + [None] * (self.num_agents - 1),
+                "preparations": [None] * self.num_agents
+            }
+            for context, review in zip(contexts, human_reviews)
+        ]
+
+        # Calculate total operations for progress bar
+        total_operations = n_tasks * (len(self.agent_perspectives) - 1)  # Exclude first agent
+        pbar = tqdm(total=total_operations, desc="Generating responses", unit="responses")
+
+        # Generate remaining responses concurrently
+        async def process_agent(agent_idx, perspective):
+            for task in tasks:
+                start_time = time.time()
+
+                if perspective["strategy"] is None:
+                    task["responses"][agent_idx] = "This paper presents research findings. The methodology and results appear sound."
+                    pbar.update(1)
+                    continue
+
+                # Generate reading output if prompt exists
+                if perspective.get("reading"):
+                    reading_prompt = f"{perspective['reading']}\n\n{task['context']}"
+                    preparation, _ = await generate_completion_async(
+                        reading_prompt,
+                        self.model_config["model_name"],
+                        self.model_config["max_tokens"]
+                    )
+                    task["preparations"][agent_idx] = preparation
+                    strategy_context = preparation if preparation else task["context"]
+                else:
+                    strategy_context = task["context"]
+
+                # Generate final response
+                strategy_prompt = f"{perspective.get('strategy', '')}\n\n{strategy_context}"
+                response, _ = await generate_completion_async(
+                    strategy_prompt,
+                    self.model_config["model_name"],
+                    self.model_config["max_tokens"]
+                )
+                task["responses"][agent_idx] = response if response else "No response generated"
+
+                pbar.update(1)
+                elapsed = time.time() - start_time
+                pbar.set_postfix({'time/response': f'{elapsed:.2f}s'})
+
+        try:
+            # Process all non-human agents concurrently
+            await asyncio.gather(*[
+                process_agent(i, perspective)
+                for i, perspective in enumerate(self.agent_perspectives[1:], start=1)
+            ])
+        finally:
+            pbar.close()
+
+        return contexts, self.agent_perspectives, tasks
+        
     def process_perspectives(self, perspectives, contexts):
         """
         Simulate a response based on the context and perspective.
@@ -257,6 +337,26 @@ class ExperimentOracle:
                 string_data.append({"context": contexts[i], "responses": responses})
             return string_data
 
+    async def get_critic(self, index_pair, x, y):
+        if self.exp_type == "synthetic":
+            score = self.preset_critic(index_pair, x, y)
+            return score, "synthetic critic", {"type": "synthetic"}
+        elif self.exp_type == "llm":
+            return await self.llm_critic(x, y)
+        else:
+            score = self.simple_critic(index_pair, x, y)
+            return score, "simple critic", {"type": "simple"}
+
+    async def get_judge(self, x, y):
+        if self.exp_type == "synthetic":
+            score = self.preset_judge(x, y)
+            return score, "synthetic judge", {"type": "synthetic"}
+        elif self.exp_type == "llm":
+            return await self.llm_judge(x, y)
+        else:
+            score = self.simple_judge(x, y)
+            return score, "simple judge", {"type": "simple"}
+
     def preset_critic(self, index_pair, x, y):
         """
         Static critic using preset rules for testing without API calls.
@@ -281,46 +381,39 @@ class ExperimentOracle:
         x_bin = interpret_response_back(x)
         y_bin = interpret_response_back(y)
 
-        global judge_calls
-        judge_calls += 2
-        # Dummy logic: prefer 'like' over 'dislike'
+        increment_judge_calls()  # Changed from global variable
         return int(x_bin > y_bin)
 
     def simple_critic(self, index_pair, x, y):
         """
-        Basic text-based judge using length comparison.
-        Used as fallback when API calls fail or for testing.
+        Binary critic function that returns 1 if responses are dependent, 0 if independent.
         """
         if x == "This abstract discusses important research findings. The methodology appears sound. Further investigation may be warranted.":
             return 0
         elif y == "This abstract discusses important research findings. The methodology appears sound. Further investigation may be warranted.":
-            return 1
+            return 0
 
         # Define a list of common stop words to ignore
         stop_words = set(['a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'])
-        
-        # Function to extract keywords from text
+
         def extract_keywords(text):
-            # Convert to lowercase and split into words
             words = re.findall(r'\w+', text.lower())
-            # Remove stop words and keep words with length > 2
             return set(word for word in words if word not in stop_words and len(word) > 2)
-        
-        # Extract keywords from both texts
+
         x_keywords = extract_keywords(x)
         y_keywords = extract_keywords(y)
-        
+
         # Calculate overlap
         overlap = len(x_keywords.intersection(y_keywords))
         total_keywords = len(x_keywords.union(y_keywords))
-        
+
         # Calculate overlap ratio
         overlap_ratio = overlap / total_keywords if total_keywords > 0 else 0
-        
+
         # Define threshold (you can adjust this value)
         threshold = 0.1
-        
-        # Return 1 if overlap ratio is above threshold, 0 otherwise
+
+        # Return 1 if overlap ratio is above threshold (dependent), 0 otherwise (independent)
         return 1 if overlap_ratio > threshold else 0
 
     def simple_judge(self, x, y):
@@ -328,13 +421,53 @@ class ExperimentOracle:
         Basic text-based judge using length comparison.
         Used as fallback when API calls fail or for testing.
         """
-        x_bin = len(x)
-        y_bin = len(y)
+        x_len = len(x)
+        y_len = len(y)
 
-        global judge_calls
-        judge_calls += 1
-        # Dummy logic: prefer 'like' over 'dislike'
-        return int(x_bin > y_bin)
+        increment_judge_calls()  # Changed from global variable
+        return int(x_len > y_len)
+
+    async def llm_critic(self, response_a: str, response_b: str) -> tuple[float, str, dict]:
+        """
+        LLM-based critic that evaluates information gain between responses.
+        Returns (score, raw_response, metadata)
+        """
+        increment_f_calls()
+        prompt = generate_tvd_mi_prompt(self.task_description, response_a, response_b)
+
+        response, metadata = await generate_completion_async(
+            prompt=prompt,
+            temperature=0.3
+        )
+
+        if response:
+            score = interpret_tvd_mi_response(response)
+            return score, response, metadata
+        else:
+            # Fallback to simple critic
+            simple_score = self.simple_critic(None, response_a, response_b)
+            return simple_score, "API call failed - using simple critic", metadata
+
+    async def llm_judge(self, response_a: str, response_b: str) -> tuple[float, str, dict]:
+        """
+        LLM-based judge that compares response quality.
+        Returns (score, raw_response, metadata)
+        """
+        increment_judge_calls()
+        prompt = generate_judge_prompt(self.task_description, response_a, response_b)
+
+        response, metadata = await generate_completion_async(
+            prompt=prompt,
+            temperature=0.3
+        )
+
+        if response:
+            score = interpret_judge_response(response)
+            return score, response, metadata
+        else:
+            # Fallback to simple judge
+            simple_score = self.simple_judge(response_a, response_b)
+            return simple_score, "API call failed - using simple judge", metadata
 
     def get_num_agents(self):
         return self.num_agents
@@ -367,62 +500,6 @@ class ExperimentOracle:
         )
         return pairwise_joint / pairwise_joint.sum()  # Normalize
 
-## API
-
-def count_tokens(text: str, model = 'gpt-4o-mini') -> int:
-    model = 'gpt-4o-mini'
-    """
-    Counts the number of tokens in the given text for the specified model.
-
-    Args:
-        text (str): The text to count tokens for.
-        model (str): The OpenAI model name.
-
-    Returns:
-        int: The number of tokens.
-    """
-    encoding = tiktoken.encoding_for_model(model)
-
-    return len(encoding.encode(text))
-
-async def generate_completion_async(prompt: str, model_name: str, max_tokens: int) -> Tuple[Optional[str], int]:
-    """
-    Asynchronously generates a completion using OpenAI's Chat Completions API.
-
-    Args:
-        prompt (str): The prompt to send to the model.
-        model_name (str): The name of the OpenAI model to use.
-        max_tokens (int): The maximum number of tokens to generate.
-
-    Returns:
-        Tuple[Optional[str], int]: A tuple containing the generated completion text (or None if an error occurs) and the number of tokens used in this call.
-    """
-    try:
-        # Count tokens in the prompt
-        token_count_prompt = count_tokens(prompt, model_name)
-
-        # Create the chat completion asynchronously
-        response = await client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=1.0,
-        )
-
-        # Extract the assistant's reply
-        assistant_message = response.choices[0].message.content
-
-        # Count tokens in the response
-        token_count_response = count_tokens(assistant_message, model_name)
-
-        # Calculate total tokens for this call
-        tokens_used = token_count_prompt + token_count_response
-
-        return assistant_message, tokens_used
-
-    except Exception as e:
-        print(f"Error generating completion: {str(e)}")
-        return None, 0
 
 ## Mechanisms
 
@@ -453,7 +530,6 @@ if assistant B is better, and "[[C]]" for a tie.
 [The End of Assistant B's Answer]
 """
     return prompt
-
 
 def interpret_judge_response(response: str) -> float:
     if "[[A]]" in response:
@@ -525,7 +601,6 @@ def llm_approximation(data, f):
     Approximate TVD-MI using the LLM method for a pair of agents with subsampling.
     Now returns individual comparisons with pair information.
     """
-    global f_calls
     t = len(data)
     p_comparisons = []
     q_comparisons = []
@@ -534,7 +609,7 @@ def llm_approximation(data, f):
     for x, y in data:
         result = f(x, y)
         p_comparisons.append({"result": result, "distribution": "p", "x": x, "y": y})
-    f_calls += t
+    increment_f_calls(t)
 
     # q distribution (subsample t pairs instead of t*t)
     shuffled_pairs = list(product(*zip(*data)))
@@ -544,67 +619,96 @@ def llm_approximation(data, f):
     for x, y in subsampled_pairs:
         result = f(x, y)
         q_comparisons.append({"result": result, "distribution": "q", "x": x, "y": y})
-    f_calls += t
+    increment_f_calls(t)
 
     return p_comparisons + q_comparisons
 
 
-def calculate_agent_scores(data, oracle):
-    """
-    Calculate scores for all agent pairs using critic and judge functions.
-
-    Args:
-        data: List of dictionaries containing context and agent responses
-        oracle: ExperimentOracle instance with scoring methods
-
-    Returns:
-        List of all comparison results with metadata
-    """
+async def calculate_agent_scores(data, oracle):
     num_agents = oracle.get_num_agents()
     all_comparisons = []
 
+    # Increase batch size significantly
+    BATCH_SIZE = 500  # 10x increase
+
+    # Create all comparison tasks upfront
+    comparison_tasks = []
     for i in range(num_agents):
-        print(f"Scoring Agent {i+1}")
         for j in range(num_agents):
             if i != j:
-                # Select appropriate scoring functions
-                if oracle.exp_type == "synthetic":
-                    critic_fn = lambda x, y: oracle.preset_critic((i, j), x, y)
-                    judge_fn = lambda x, y: oracle.preset_judge(x, y)
-                else:  # llm mode
-                    critic_fn = lambda x, y: oracle.simple_critic((i, j), x, y)
-                    judge_fn = lambda x, y: oracle.simple_judge(x, y)
+                # Get data pairs
+                p_data = [(d["responses"][i], d["responses"][j]) for d in data]
 
-                # Extract response pairs for comparison
-                pairwise_data = [(d["responses"][i], d["responses"][j]) for d in data]
+                # Create shuffled q distribution
+                shuffled_responses_j = [d["responses"][j] for d in data]
+                random.shuffle(shuffled_responses_j)
+                q_data = list(zip([d["responses"][i] for d in data], shuffled_responses_j))
 
-                # Get critic comparisons
-                comparisons = llm_approximation(pairwise_data, critic_fn)
-                for comp in comparisons:
-                    comp["agent_pair"] = (i + 1, j + 1)
-                    comp["comparison_type"] = "critic"
-                    comp["prompt"] = generate_tvd_mi_prompt(
-                        oracle.task_description, comp["x"], comp["y"]
-                    )
-                all_comparisons.extend(comparisons)
-
-                # Get judge comparisons
-                judge_comparisons = [
-                    {
-                        "agent_pair": (i + 1, j + 1),
-                        "result": judge_fn(x, y),
+                # Add all tasks to queue
+                for x, y in p_data:
+                    comparison_tasks.append({
+                        "pair": (i, j),
                         "x": x,
                         "y": y,
-                        "comparison_type": "judge",
-                        "prompt": generate_judge_prompt(oracle.task_description, x, y),
-                    }
-                    for x, y in pairwise_data
-                ]
-                all_comparisons.extend(judge_comparisons)
-                global judge_calls
-                judge_calls += len(pairwise_data)
+                        "type": "critic",
+                        "distribution": "p"
+                    })
+                for x, y in q_data:
+                    comparison_tasks.append({
+                        "pair": (i, j),
+                        "x": x,
+                        "y": y, 
+                        "type": "critic",
+                        "distribution": "q"
+                    })
+                for x, y in p_data:
+                    comparison_tasks.append({
+                        "pair": (i, j),
+                        "x": x,
+                        "y": y,
+                        "type": "judge",
+                        "distribution": None
+                    })
+
+    # Process in larger batches with rate limiting
+    for i in range(0, len(comparison_tasks), BATCH_SIZE):
+        batch = comparison_tasks[i:i + BATCH_SIZE]
+
+        # Process batch concurrently
+        results = await asyncio.gather(*[
+            process_single_comparison(task, oracle)
+            for task in batch
+        ])
+
+        all_comparisons.extend(results)
 
     return all_comparisons
+
+async def process_single_comparison(task, oracle):
+    """Process a single comparison task"""
+    i, j = task["pair"]
+    x, y = task["x"], task["y"]
+
+    if task["type"] == "critic":
+        result, raw_response, metadata = await oracle.get_critic((i, j), x, y)
+        prompt = generate_tvd_mi_prompt(oracle.task_description, x, y)
+        comparison_type = "critic"
+    else:
+        result, raw_response, metadata = await oracle.get_judge(x, y)
+        prompt = generate_judge_prompt(oracle.task_description, x, y)
+        comparison_type = "judge"
+
+    return {
+        "agent_pair": (i + 1, j + 1),
+        "result": result,
+        "x": x,
+        "y": y,
+        "comparison_type": comparison_type,
+        "prompt": prompt,
+        "distribution": task["distribution"],
+        "raw_response": raw_response,
+        "metadata": metadata
+    }
 
 def save_experiment_dataset(
     tasks: List[Dict[str, Any]], 
@@ -614,14 +718,7 @@ def save_experiment_dataset(
     metadata: Optional[Dict[str, Any]] = None
 ):
     """
-    Enhanced version of save_experiment_dataset that includes metadata.
-
-    Args:
-        tasks: List of task dictionaries containing context and responses
-        task_description: Description of the task
-        agent_perspectives: List of agent perspective dictionaries
-        filename: Optional custom filename
-        metadata: Optional metadata about the experiment run (tokens used, timing, etc)
+    Enhanced version of save_experiment_dataset that includes metadata and preparations.
     """
     if filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -632,7 +729,8 @@ def save_experiment_dataset(
         "agent_perspectives": agent_perspectives,
         "tasks": [{
             "context": task.get("context"),
-            "responses": task["responses"]
+            "preparations": task.get("preparations", [None] * len(task["responses"])),  # Include preparations if they exist
+            "responses": task["responses"],
         } for task in tasks],
         "metadata": metadata or {},
         "timestamp": datetime.now().isoformat()
@@ -690,13 +788,14 @@ def calculate_total_calls(num_agents, n_tasks):
 
 def calculate_empirical_tvd_mi(all_comparisons, num_agents):
     """
-    Calculate the empirical TVD-MI matrix from individual comparisons.
+    Calculate the empirical TVD-MI matrix using the binary critic function results.
     """
     empirical_tvd_mi = np.zeros((num_agents, num_agents))
 
     for i in range(1, num_agents + 1):
         for j in range(1, num_agents + 1):
             if i != j:
+                # Get all critic results for this pair
                 p_results = [
                     comp["result"]
                     for comp in all_comparisons
@@ -713,9 +812,12 @@ def calculate_empirical_tvd_mi(all_comparisons, num_agents):
                 ]
 
                 if p_results and q_results:
-                    empirical_tvd_mi[i - 1][j - 1] = np.mean(p_results) - np.mean(
-                        q_results
-                    )
+                    # Calculate means of binary results
+                    p_mean = np.mean(p_results)  # P(f(X,Y)=1)
+                    q_mean = np.mean(q_results)  # P(f(X',Y)=1)
+
+                    # TVD-MI lower bound is difference between these probabilities
+                    empirical_tvd_mi[i - 1][j - 1] = p_mean - q_mean
 
     return empirical_tvd_mi
 
@@ -782,9 +884,9 @@ async def experiment(oracle, n_tasks = None):
     )
     print(f"Generated data saved to {data_filename}")
 
-    # Calculate scores
+    # Calculate scores - Add await here
     print("\nScoring Mechanism")
-    all_comparisons = calculate_agent_scores(responses, oracle)
+    all_comparisons = await calculate_agent_scores(responses, oracle)  # Added await
 
     # Save scoring results
     results_filename = f"{base_filename}_results.json"
@@ -798,6 +900,128 @@ async def experiment(oracle, n_tasks = None):
 
     return all_comparisons
 
+def calculate_correlations(tvd_mi_matrix, judge_matrix, mean_tvd_scores, mean_judge_scores):
+    """
+    Calculate correlations between TVD-MI and Judge scores.
+    Returns both matrix entry correlations and agent score correlations.
+    """
+    import scipy.stats as stats
+
+    # Flatten matrices excluding diagonals
+    tvd_flat = []
+    judge_flat = []
+    n = len(tvd_mi_matrix)
+
+    for i in range(n):
+        for j in range(n):
+            if i != j:  # Exclude diagonal
+                tvd_flat.append(tvd_mi_matrix[i][j])
+                judge_flat.append(judge_matrix[i][j])
+
+    # Calculate matrix correlations
+    pearson_matrix, p_val_matrix = stats.pearsonr(tvd_flat, judge_flat)
+    spearman_matrix, sp_val_matrix = stats.spearmanr(tvd_flat, judge_flat)
+
+    # Calculate agent score correlations
+    pearson_agents, p_val_agents = stats.pearsonr(mean_tvd_scores, mean_judge_scores)
+    spearman_agents, sp_val_agents = stats.spearmanr(mean_tvd_scores, mean_judge_scores)
+
+    return {
+        'matrix': {
+            'pearson': (pearson_matrix, p_val_matrix),
+            'spearman': (spearman_matrix, sp_val_matrix)
+        },
+        'agents': {
+            'pearson': (pearson_agents, p_val_agents),
+            'spearman': (spearman_agents, sp_val_agents)
+        }
+    }
+
+def calculate_score_stats(all_comparisons, num_agents):
+    """
+    Calculate means and confidence intervals for binary-valued scores with proper symmetry handling.
+    """
+    import numpy as np
+    from scipy import stats
+
+    agent_stats = []
+
+    # Initialize matrices
+    judge_matrix = np.zeros((num_agents, num_agents))
+    judge_counts = np.zeros((num_agents, num_agents))
+
+    # First pass: populate the judge matrix with raw scores and handle symmetry
+    for comp in all_comparisons:
+        if comp["comparison_type"] == "judge":
+            i, j = comp["agent_pair"]
+            i, j = i-1, j-1  # Convert to 0-based indexing
+            result = comp["result"]
+            
+            # Add the result and its complement for symmetry
+            judge_matrix[i][j] += result
+            judge_matrix[j][i] += (1.0 - result)
+            judge_counts[i][j] += 1
+            judge_counts[j][i] += 1
+
+    # Normalize the judge matrix by number of comparisons
+    judge_matrix_normalized = np.zeros((num_agents, num_agents))
+    for i in range(num_agents):
+        for j in range(num_agents):
+            if judge_counts[i][j] > 0:
+                judge_matrix_normalized[i][j] = judge_matrix[i][j] / judge_counts[i][j]
+
+    # Calculate TVD-MI components and stats for each agent
+    for i in range(num_agents):
+        # Get all TVD-MI components for this agent
+        p_results = []
+        q_results = []
+        
+        # Collect all judge results for this agent
+        judge_results = []
+        for j in range(num_agents):
+            if i != j:
+                # TVD-MI results
+                p_results.extend([
+                    comp["result"] for comp in all_comparisons
+                    if comp["agent_pair"] == (i+1, j+1)
+                    and comp["comparison_type"] == "critic"
+                    and comp["distribution"] == "p"
+                ])
+                q_results.extend([
+                    comp["result"] for comp in all_comparisons
+                    if comp["agent_pair"] == (i+1, j+1)
+                    and comp["comparison_type"] == "critic"
+                    and comp["distribution"] == "q"
+                ])
+                
+                # Get normalized judge scores for this agent against others
+                if judge_counts[i][j] > 0:
+                    judge_results.extend([judge_matrix_normalized[i][j]] * int(judge_counts[i][j]))
+
+        # Calculate TVD-MI mean and SE
+        p_mean = np.mean(p_results) if p_results else 0
+        q_mean = np.mean(q_results) if q_results else 0
+        tvd_score = p_mean - q_mean
+
+        # Standard error for difference of proportions
+        p_se = np.sqrt(p_mean*(1-p_mean)/len(p_results)) if p_results else 0
+        q_se = np.sqrt(q_mean*(1-q_mean)/len(q_results)) if q_results else 0
+        tvd_se = np.sqrt(p_se**2 + q_se**2)
+
+        # Calculate judge mean and SE with normalized scores
+        judge_mean = np.mean(judge_results) if judge_results else 0
+        judge_se = np.sqrt(np.var(judge_results) / len(judge_results)) if judge_results else 0
+
+        agent_stats.append({
+            'tvd_mean': tvd_score,
+            'tvd_se': tvd_se,
+            'judge_mean': judge_mean,
+            'judge_se': judge_se,
+            'raw_judge_scores': judge_results
+        })
+
+    return agent_stats
+    
 async def main_async():
     """
     Main function to run the experiment.
@@ -805,22 +1029,44 @@ async def main_async():
     # Define experiment configuration
     exp_config = {
         "exp_type": "llm",
-        "num_agents": 3,
+        "num_agents": 6,
         "model_config": {
             "model_name": OPENAI_MODEL,
             "max_tokens": MAX_TOKENS,
             "temperature": 1.0
         },
-        "task_description": "The following are abstract reviews.",
+        "task_description": "The following are paper reviews.",
         "agent_perspectives": [
-            {"reading": None, "strategy": "Please review the following abstract in three sentences."},
-            {"reading": None, "strategy": "Please review the following abstract in three sentences."},
-            {"reading": None, "strategy": None}  # Null model
+            {
+                "reading": "Human reading",
+                "strategy": "ICLR reviewing instructions"
+            },
+            {
+                "reading": "Take notes on the paper for an ICLR style review. Make the notes read as though they are totally different results and methodology than in the main paper. Just output the notes.",
+                "strategy": "Based on the notes please write an ICLR style review of the paper in 3-4 paragraphs covering methods, results and impact. Calibrate to 20 percent acceptance rate."
+            },
+            {
+                "reading": "Take notes on the paper for an ICLR style review. Change technical details in the notes to differ from the main paper. Just output the notes.",
+                "strategy": "Based on the notes please write an ICLR style review of the paper in 3-4 paragraphs covering methods, results and impact. Calibrate to 20 percent acceptance rate."
+            },
+            {
+                "reading": "Take notes on the paper for an ICLR style review.",
+                "strategy": "Based on the notes please write an ICLR style review of the paper in 3-4 paragraphs covering methods, results and impact. Calibrate to 20 percent acceptance rate."
+            },
+            {
+                "reading": "Take notes on the paper for an ICLR style review.", 
+                "strategy": "Based on the notes please write a very brief review in 1 paragraph. Calibrate to 20 percent acceptance rate."
+            },
+            {
+                "reading": None,
+                "strategy": None
+            }
         ],
         "data_config": {
-            "n_tasks": 50,
-            "preload": True,
-            "preload_path": "data/llm_experiment_data_20241107_114841.json"
+            "n_tasks": 100,
+            "preload_type": "full",
+            "data_path": "data/ICLR_2023_100.json",
+            "preload_path": "data/llm_20241213_102906_data.json"
         }
     }
 
@@ -875,19 +1121,44 @@ async def main_async():
 
     print(f"Objective Critic Score - {mean_tvd_scores.mean()}")
 
-    # Print the summed scores
-    print("Mean Scores per Agent:")
-    for agent in range(1, num_agents + 1):
+    # Update print section in main_async():
+    agent_stats = calculate_score_stats(all_comparisons, num_agents)
+
+    print("Mean Scores per Agent (mean ± SE):")
+    for i, stats in enumerate(agent_stats):
         print(
-            f"  Agent {agent} - Total TVD-MI score: {mean_tvd_scores[agent-1]:.4f}, "
-            f"Mean Judge score: {mean_judge_scores[agent-1]:.4f}"
+            f"  Agent {i+1} - "
+            f"TVD-MI score: {stats['tvd_mean']:.4f} ± {1.96*stats['tvd_se']:.4f}, "
+            f"Judge score: {stats['judge_mean']:.4f} ± {1.96*stats['judge_se']:.4f}"
         )
+
+    # Add correlation analysis
+    correlations = calculate_correlations(
+        empirical_tvd_mi_matrix, 
+        judge_matrix,
+        mean_tvd_scores,
+        mean_judge_scores
+    )
+
+    print("\nCorrelation Analysis:")
+    print("Matrix Entry Correlations (excluding diagonals):")
+    print(f"  Pearson:  r = {correlations['matrix']['pearson'][0]:.4f} (p = {correlations['matrix']['pearson'][1]:.4f})")
+    print(f"  Spearman: ρ = {correlations['matrix']['spearman'][0]:.4f} (p = {correlations['matrix']['spearman'][1]:.4f})")
+
+    print("\nAgent Mean Score Correlations:")
+    print(f"  Pearson:  r = {correlations['agents']['pearson'][0]:.4f} (p = {correlations['agents']['pearson'][1]:.4f})")
+    print(f"  Spearman: ρ = {correlations['agents']['spearman'][0]:.4f} (p = {correlations['agents']['spearman'][1]:.4f})")
     print()
 
-    # Print the actual number of calls made during the experiment
-    print(f"\nActual f calls: {f_calls}")
-    print(f"Actual judge calls: {judge_calls}")
-    print(f"Total actual oracle calls: {f_calls + judge_calls}")
+    print("\nMechanism Call Statistics:")
+    print(f"  f_calls: {get_mechanism_stats()['f_calls']}")
+    print(f"  judge_calls: {get_mechanism_stats()['judge_calls']}")
+    print(f"  Total mechanism calls: {get_mechanism_stats()['f_calls'] + get_mechanism_stats()['judge_calls']}")
+
+    print("\nAPI Statistics:")
+    print(f"  Total API calls: {get_api_stats()['calls']}")
+    print(f"  Total tokens: {get_api_stats()['tokens']['total']}")
+    print(f"  Duration: {get_api_stats()['duration']:.2f} seconds")
 
 def main():
     """
