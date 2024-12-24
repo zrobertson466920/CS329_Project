@@ -1,4 +1,54 @@
-# LLM Evaluation Framework
+# Information-Theoretic LLM Evaluation Framework
+
+This repository contains the implementation of an information-theoretic framework for evaluating Language Model (LLM) outputs, developed through two related works:
+
+1. [Workshop Paper](https://openreview.net/forum?id=QqMnRGlRJk): "Implementability of Information Elicitation Mechanisms with Pre-Trained Language Models" presented at the [ICML TF2M workshop](https://icml.cc/virtual/2024/workshop/29956)
+2. Class Project: "Information-Theoretic Measures for LLM Output Evaluation" (CS329 2023)
+
+## Project Evolution
+
+This work began as research into information-theoretic measures for LLM evaluation, first presented at [ICML TF2M workshop](https://icml.cc/virtual/2024/workshop/29956). The class project extends this foundation by:
+- Implementing asynchronous API-based evaluation
+- Adding comparative analysis between human and LLM judges
+- Developing scalable oversight mechanisms for text quality
+
+## Publications
+
+### Original Workshop Paper
+"Implementability of Information Elicitation Mechanisms with Pre-Trained Language Models"
+- Develops theoretical foundations for information-theoretic LLM evaluation
+- Introduces Difference of Entropies (DoE) estimator
+- Provides initial empirical validation
+
+### Class Project Extension
+"Information-Theoretic Measures for LLM Output Evaluation"
+- Implements practical framework for large-scale evaluation
+- Compares human vs LLM judgment patterns
+- Demonstrates applications in text quality assessment
+
+## Citations
+
+### Software
+```bibtex
+@software{robertson2023llm,
+  author = {Robertson, Zachary and Bedi, Suhana and Lee, Hansol},
+  title = {LLM Evaluation Framework},
+  year = {2023},
+  url = {https://github.com/zrobertson466920/CS329_Project},
+  version = {1.0.0}
+}
+```
+
+### Research Paper
+```bibtex
+@inproceedings{robertson2024implementability,
+  title={Implementability of Information Elicitation Mechanisms with Pre-Trained Language Models},
+  author={Robertson, Zachary and Cha, Hannah and Sheha, Andrew and Koyejo, Sanmi},
+  booktitle={ICML 2024 Workshop on Theoretical Foundations of Foundation Models}
+}
+```
+
+## Key Technical Components
 
 This project implements a framework for evaluating and comparing Language Model (LLM) responses using information-theoretic measures and pairwise comparisons.
 

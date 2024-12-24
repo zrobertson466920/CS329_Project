@@ -61,6 +61,9 @@ class ExperimentOracle:
         self.num_agents = exp_config["num_agents"]
         self.task_description = exp_config["task_description"]
         self.data_config = exp_config["data_config"]
+        self.preload_type = self.data_config.get("preload_type", "none")  # none, full, partial
+        if self.preload_type not in ["none", "full", "partial"]:
+            raise ValueError("Invalid preload_type. Must be 'none', 'full', or 'partial'")
 
         # Optional parameters with defaults
         self.model_config = exp_config.get("model_config", {
@@ -148,7 +151,9 @@ class ExperimentOracle:
         if preload is None:
             preload = self.data_config.get("preload", False)
 
-        if preload:
+        if self.preload_type == "partial":
+            return await self._generate_partial_data(n_tasks)
+        elif self.preload_type == "full":
             preload_path = self.data_config.get("preload_path", "data/preload_llm_experiment_data.json")
             print(f"Loading preloaded data from {preload_path}")
 
@@ -216,6 +221,84 @@ class ExperimentOracle:
 
         return contexts, self.agent_perspectives, tasks
 
+    async def _generate_partial_data(self, n_tasks):
+        """Handle partial preloading where first agent uses existing reviews."""
+        from tqdm.asyncio import tqdm
+        import time
+
+        # Load source data containing papers and their human reviews
+        data_path = self.data_config.get("data_path")
+        if not data_path:
+            raise ValueError("data_path required for partial preloading")
+
+        with open(data_path, "r") as f:
+            source_data = json.load(f)
+
+        # Extract contexts and human reviews 
+        contexts = [item['instruction'] for item in source_data[:n_tasks]]
+        human_reviews = [item['reference'] for item in source_data[:n_tasks]]
+
+        # Initialize tasks with human reviews as first agent
+        tasks = [
+            {
+                "context": context,
+                "responses": [review] + [None] * (self.num_agents - 1),
+                "preparations": [None] * self.num_agents
+            }
+            for context, review in zip(contexts, human_reviews)
+        ]
+
+        # Calculate total operations for progress bar
+        total_operations = n_tasks * (len(self.agent_perspectives) - 1)  # Exclude first agent
+        pbar = tqdm(total=total_operations, desc="Generating responses", unit="responses")
+
+        # Generate remaining responses concurrently
+        async def process_agent(agent_idx, perspective):
+            for task in tasks:
+                start_time = time.time()
+
+                if perspective["strategy"] is None:
+                    task["responses"][agent_idx] = "This paper presents research findings. The methodology and results appear sound."
+                    pbar.update(1)
+                    continue
+
+                # Generate reading output if prompt exists
+                if perspective.get("reading"):
+                    reading_prompt = f"{perspective['reading']}\n\n{task['context']}"
+                    preparation, _ = await generate_completion_async(
+                        reading_prompt,
+                        self.model_config["model_name"],
+                        self.model_config["max_tokens"]
+                    )
+                    task["preparations"][agent_idx] = preparation
+                    strategy_context = preparation if preparation else task["context"]
+                else:
+                    strategy_context = task["context"]
+
+                # Generate final response
+                strategy_prompt = f"{perspective.get('strategy', '')}\n\n{strategy_context}"
+                response, _ = await generate_completion_async(
+                    strategy_prompt,
+                    self.model_config["model_name"],
+                    self.model_config["max_tokens"]
+                )
+                task["responses"][agent_idx] = response if response else "No response generated"
+
+                pbar.update(1)
+                elapsed = time.time() - start_time
+                pbar.set_postfix({'time/response': f'{elapsed:.2f}s'})
+
+        try:
+            # Process all non-human agents concurrently
+            await asyncio.gather(*[
+                process_agent(i, perspective)
+                for i, perspective in enumerate(self.agent_perspectives[1:], start=1)
+            ])
+        finally:
+            pbar.close()
+
+        return contexts, self.agent_perspectives, tasks
+        
     def process_perspectives(self, perspectives, contexts):
         """
         Simulate a response based on the context and perspective.
@@ -423,13 +506,17 @@ class ExperimentOracle:
 
 def generate_judge_prompt(query: str, response_a: str, response_b: str) -> str:
     prompt = f"""[System]
-Please act as an impartial judge evaluating the COMPLETENESS of two responses to an academic abstract. Completeness refers to:
-1. Coverage of key findings and contributions
-2. Discussion of important methodology details
-3. Inclusion of relevant context and implications
-4. Addressing all major aspects of the research
-
-Base your evaluation ONLY on completeness, ignoring other aspects like style or precise accuracy.
+Please act as an impartial judge and evaluate the quality of the responses provided by two
+AI assistants to the user question displayed below. You should choose the assistant that
+follows the user’s instructions and answers the user’s question better. Your evaluation
+should consider factors such as the helpfulness, relevance, accuracy, depth, creativity,
+and level of detail of their responses. Begin your evaluation by comparing the two
+responses and provide a short explanation. Avoid any position biases and ensure that the
+order in which the responses were presented does not influence your decision. Do not allow
+the length of the responses to influence your evaluation. Do not favor certain names of
+the assistants. Be as objective as possible. After providing your explanation, output your
+final verdict by strictly following this format: "[[A]]" if assistant A is better, "[[B]]"
+if assistant B is better, and "[[C]]" for a tie.
 
 [User Question]
 {query}
@@ -441,11 +528,6 @@ Base your evaluation ONLY on completeness, ignoring other aspects like style or 
 [The Start of Assistant B's Answer]
 {response_b}
 [The End of Assistant B's Answer]
-
-First, identify the key elements covered/missing in each response. Then provide a brief explanation focused on completeness. Finally, output your verdict using:
-"[[A]]" if Assistant A's response is more complete
-"[[B]]" if Assistant B's response is more complete
-"[[C]]" if both responses are equally complete/incomplete
 """
     return prompt
 
@@ -636,14 +718,7 @@ def save_experiment_dataset(
     metadata: Optional[Dict[str, Any]] = None
 ):
     """
-    Enhanced version of save_experiment_dataset that includes metadata.
-
-    Args:
-        tasks: List of task dictionaries containing context and responses
-        task_description: Description of the task
-        agent_perspectives: List of agent perspective dictionaries
-        filename: Optional custom filename
-        metadata: Optional metadata about the experiment run (tokens used, timing, etc)
+    Enhanced version of save_experiment_dataset that includes metadata and preparations.
     """
     if filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -654,7 +729,8 @@ def save_experiment_dataset(
         "agent_perspectives": agent_perspectives,
         "tasks": [{
             "context": task.get("context"),
-            "responses": task["responses"]
+            "preparations": task.get("preparations", [None] * len(task["responses"])),  # Include preparations if they exist
+            "responses": task["responses"],
         } for task in tasks],
         "metadata": metadata or {},
         "timestamp": datetime.now().isoformat()
@@ -861,6 +937,91 @@ def calculate_correlations(tvd_mi_matrix, judge_matrix, mean_tvd_scores, mean_ju
         }
     }
 
+def calculate_score_stats(all_comparisons, num_agents):
+    """
+    Calculate means and confidence intervals for binary-valued scores with proper symmetry handling.
+    """
+    import numpy as np
+    from scipy import stats
+
+    agent_stats = []
+
+    # Initialize matrices
+    judge_matrix = np.zeros((num_agents, num_agents))
+    judge_counts = np.zeros((num_agents, num_agents))
+
+    # First pass: populate the judge matrix with raw scores and handle symmetry
+    for comp in all_comparisons:
+        if comp["comparison_type"] == "judge":
+            i, j = comp["agent_pair"]
+            i, j = i-1, j-1  # Convert to 0-based indexing
+            result = comp["result"]
+            
+            # Add the result and its complement for symmetry
+            judge_matrix[i][j] += result
+            judge_matrix[j][i] += (1.0 - result)
+            judge_counts[i][j] += 1
+            judge_counts[j][i] += 1
+
+    # Normalize the judge matrix by number of comparisons
+    judge_matrix_normalized = np.zeros((num_agents, num_agents))
+    for i in range(num_agents):
+        for j in range(num_agents):
+            if judge_counts[i][j] > 0:
+                judge_matrix_normalized[i][j] = judge_matrix[i][j] / judge_counts[i][j]
+
+    # Calculate TVD-MI components and stats for each agent
+    for i in range(num_agents):
+        # Get all TVD-MI components for this agent
+        p_results = []
+        q_results = []
+        
+        # Collect all judge results for this agent
+        judge_results = []
+        for j in range(num_agents):
+            if i != j:
+                # TVD-MI results
+                p_results.extend([
+                    comp["result"] for comp in all_comparisons
+                    if comp["agent_pair"] == (i+1, j+1)
+                    and comp["comparison_type"] == "critic"
+                    and comp["distribution"] == "p"
+                ])
+                q_results.extend([
+                    comp["result"] for comp in all_comparisons
+                    if comp["agent_pair"] == (i+1, j+1)
+                    and comp["comparison_type"] == "critic"
+                    and comp["distribution"] == "q"
+                ])
+                
+                # Get normalized judge scores for this agent against others
+                if judge_counts[i][j] > 0:
+                    judge_results.extend([judge_matrix_normalized[i][j]] * int(judge_counts[i][j]))
+
+        # Calculate TVD-MI mean and SE
+        p_mean = np.mean(p_results) if p_results else 0
+        q_mean = np.mean(q_results) if q_results else 0
+        tvd_score = p_mean - q_mean
+
+        # Standard error for difference of proportions
+        p_se = np.sqrt(p_mean*(1-p_mean)/len(p_results)) if p_results else 0
+        q_se = np.sqrt(q_mean*(1-q_mean)/len(q_results)) if q_results else 0
+        tvd_se = np.sqrt(p_se**2 + q_se**2)
+
+        # Calculate judge mean and SE with normalized scores
+        judge_mean = np.mean(judge_results) if judge_results else 0
+        judge_se = np.sqrt(np.var(judge_results) / len(judge_results)) if judge_results else 0
+
+        agent_stats.append({
+            'tvd_mean': tvd_score,
+            'tvd_se': tvd_se,
+            'judge_mean': judge_mean,
+            'judge_se': judge_se,
+            'raw_judge_scores': judge_results
+        })
+
+    return agent_stats
+    
 async def main_async():
     """
     Main function to run the experiment.
@@ -874,37 +1035,38 @@ async def main_async():
             "max_tokens": MAX_TOKENS,
             "temperature": 1.0
         },
-        "task_description": "The following are abstract reviews.",
+        "task_description": "The following are paper reviews.",
         "agent_perspectives": [
             {
-            "reading": None,
-            "strategy": "Please review the following abstract professionally."
+                "reading": "Human reading",
+                "strategy": "ICLR reviewing instructions"
             },
             {
-            "reading": None,
-            "strategy": "Please review the following abstract casually."
+                "reading": "Take notes on the paper for an ICLR style review. Make the notes read as though they are totally different results and methodology than in the main paper. Just output the notes.",
+                "strategy": "Based on the notes please write an ICLR style review of the paper in 3-4 paragraphs covering methods, results and impact. Calibrate to 20 percent acceptance rate."
             },
             {
-            "reading": None,
-            "strategy": "Please review the following abstract in three sentences."
+                "reading": "Take notes on the paper for an ICLR style review. Change technical details in the notes to differ from the main paper. Just output the notes.",
+                "strategy": "Based on the notes please write an ICLR style review of the paper in 3-4 paragraphs covering methods, results and impact. Calibrate to 20 percent acceptance rate."
             },
             {
-            "reading": None,
-            "strategy": "Please review the following abstract in two sentences."
+                "reading": "Take notes on the paper for an ICLR style review.",
+                "strategy": "Based on the notes please write an ICLR style review of the paper in 3-4 paragraphs covering methods, results and impact. Calibrate to 20 percent acceptance rate."
             },
             {
-            "reading": None,
-            "strategy": "Please review the following abstract in one sentence."
+                "reading": "Take notes on the paper for an ICLR style review.", 
+                "strategy": "Based on the notes please write a very brief review in 1 paragraph. Calibrate to 20 percent acceptance rate."
             },
             {
-            "reading": None,
-            "strategy": None
+                "reading": None,
+                "strategy": None
             }
         ],
         "data_config": {
-            "n_tasks": 50,
-            "preload": True,
-            "preload_path": "data/preload_llm_experiment_data.json"
+            "n_tasks": 100,
+            "preload_type": "full",
+            "data_path": "data/ICLR_2023_100.json",
+            "preload_path": "data/llm_20241213_102906_data.json"
         }
     }
 
@@ -959,14 +1121,16 @@ async def main_async():
 
     print(f"Objective Critic Score - {mean_tvd_scores.mean()}")
 
-    # Print the summed scores
-    print("Mean Scores per Agent:")
-    for agent in range(1, num_agents + 1):
+    # Update print section in main_async():
+    agent_stats = calculate_score_stats(all_comparisons, num_agents)
+
+    print("Mean Scores per Agent (mean ± SE):")
+    for i, stats in enumerate(agent_stats):
         print(
-            f"  Agent {agent} - Total TVD-MI score: {mean_tvd_scores[agent-1]:.4f}, "
-            f"Mean Judge score: {mean_judge_scores[agent-1]:.4f}"
+            f"  Agent {i+1} - "
+            f"TVD-MI score: {stats['tvd_mean']:.4f} ± {1.96*stats['tvd_se']:.4f}, "
+            f"Judge score: {stats['judge_mean']:.4f} ± {1.96*stats['judge_se']:.4f}"
         )
-    print()
 
     # Add correlation analysis
     correlations = calculate_correlations(

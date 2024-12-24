@@ -2,6 +2,7 @@ import json
 import numpy as np
 from itertools import product
 import pandas as pd
+from scipy.stats import norm
 
 def load_data(model, n):
     """Load data for given model and question number"""
@@ -9,6 +10,79 @@ def load_data(model, n):
     with open(filename, 'r') as f:
         data = json.load(f)
     return [task["responses"] for task in data["tasks"]]
+
+def load_aligned_data(models, n):
+    """
+    Load and align data across models for question n
+    Returns only tasks that exist and match across all models
+    """
+    # Load all data first
+    model_data = {}
+    for model in models:
+        filename = f"data/medical_judge_data/q{n}_experiment_data_{model}.json"
+        with open(filename, 'r') as f:
+            data = json.load(f)
+        model_data[model] = data["tasks"]
+
+    # Find minimum task count
+    min_tasks = min(len(data) for data in model_data.values())
+
+    # Track kept and dropped tasks
+    kept_tasks = []
+    dropped_tasks = {
+        'missing': [],
+        'mismatch_responses': [],
+        'mismatch_context': []
+    }
+
+    # Check each task
+    for task_idx in range(min_tasks):
+        # Get human responses and contexts for each model
+        human_responses = {}
+        contexts = {}
+        for model in models:
+            if task_idx < len(model_data[model]):
+                task = model_data[model][task_idx]
+                human_responses[model] = task["responses"][:5]
+                contexts[model] = task["context"]
+
+        # Check if responses and contexts match across all models
+        reference_resp = human_responses[models[0]]
+        reference_context = contexts[models[0]]
+
+        responses_match = all(human_responses.get(model, None) == reference_resp 
+                            for model in models[1:])
+        contexts_match = all(contexts.get(model, None) == reference_context 
+                           for model in models[1:])
+
+        if responses_match and contexts_match:
+            # Everything matches, keep task
+            kept_tasks.append(task_idx)
+        else:
+            if not responses_match:
+                dropped_tasks['mismatch_responses'].append(task_idx)
+            if not contexts_match:
+                dropped_tasks['mismatch_context'].append(task_idx)
+
+    print(f"\nQ{n} Alignment Summary:")
+    print(f"- Original tasks: {len(model_data[models[0]])}")
+    print(f"- Kept tasks: {len(kept_tasks)}")
+    print(f"- Dropped due to response mismatches: {len(dropped_tasks['mismatch_responses'])}")
+    print(f"- Dropped due to context mismatches: {len(dropped_tasks['mismatch_context'])}")
+
+    # Print first mismatch example if any
+    if dropped_tasks['mismatch_context']:
+        first_idx = dropped_tasks['mismatch_context'][0]
+        print(f"\nFirst Context Mismatch (Task {first_idx}):")
+        for model in models:
+            print(f"\n{model.upper()} Context Preview:")
+            print(contexts[model][:200] + "...")
+
+    # Return aligned data
+    return {
+        model: [model_data[model][i] for i in kept_tasks]
+        for model in models
+    }
 
 def calculate_information(responses1, responses2, metric='tvd'):
     """
@@ -66,71 +140,87 @@ def calculate_information(responses1, responses2, metric='tvd'):
 def verify_human_consistency(models, questions):
     """Verify human responses match across models for same question"""
     mismatches = []
+    task_counts = {}
 
-    # Use first model as reference
-    reference_model = models[0]
+    # Get all task counts first
+    print("\nTask Counts Summary:")
+    for model in models:
+        task_counts[model] = {}
+        for n in questions:
+            responses = load_data(model, n)
+            task_counts[model][n] = len(responses)
 
+    # Print task count differences
+    ref_model = models[0]
     for n in questions:
-        reference_responses = load_data(reference_model, n)
+        ref_count = task_counts[ref_model][n]
+        for model in models[1:]:
+            count = task_counts[model][n]
+            if ref_count != count:
+                print(f"Q{n}: {ref_model}={ref_count} vs {model}={count}")
 
-        # Compare each other model against reference
+    print("\nChecking Human Response Consistency...")
+    # Check response consistency
+    for n in questions:
+        reference_responses = load_data(ref_model, n)
+
         for model in models[1:]:
             responses = load_data(model, n)
+            min_tasks = min(len(responses), len(reference_responses))
 
-            # First check if number of tasks match
-            if len(responses) != len(reference_responses):
-                print(f"WARNING: Different number of tasks for Q{n}")
-                print(f"{reference_model} tasks: {len(reference_responses)}")
-                print(f"{model} tasks: {len(responses)}")
-                continue
-
-            # Compare first 5 responses (humans) for each task
-            for task_idx in range(len(reference_responses)):
+            q_mismatches = []
+            for task_idx in range(min_tasks):
                 try:
                     human_resp1 = reference_responses[task_idx][:5]
                     human_resp2 = responses[task_idx][:5]
 
                     if human_resp1 != human_resp2:
-                        mismatches.append({
-                            'question': n,
-                            'task': task_idx,
-                            f'{reference_model}_responses': human_resp1,
-                            f'{model}_responses': human_resp2
-                        })
+                        q_mismatches.append(task_idx)
+                        # Only store first mismatch details
+                        if len(mismatches) == 0:
+                            mismatches.append({
+                                'question': n,
+                                'task': task_idx,
+                                'responses': {
+                                    ref_model: human_resp1,
+                                    model: human_resp2
+                                }
+                            })
+
                 except IndexError as e:
-                    print(f"Error accessing responses for Q{n} task {task_idx}")
-                    print(f"{reference_model} length: {len(reference_responses[task_idx]) if task_idx < len(reference_responses) else 'N/A'}")
-                    print(f"{model} length: {len(responses[task_idx]) if task_idx < len(responses) else 'N/A'}")
+                    print(f"Response length error Q{n} Task {task_idx}")
                     raise e
 
-    return mismatches
+            if q_mismatches:
+                print(f"Q{n}: Found {len(q_mismatches)} mismatches between {ref_model}-{model}")
+
+    # Print first mismatch example if any found
+    if mismatches:
+        m = mismatches[0]
+        print("\nFirst Mismatch Example:")
+        print(f"Q{m['question']} Task {m['task']}:")
+        for model, resp in m['responses'].items():
+            print(f"{model}: {resp}")
+
+    return mismatches, task_counts
 
 def analyze_all_data(models, metric='tvd'):
     """Generate full matrix and summary statistics using specified metric"""
     questions = [1, 2, 3]
 
-    # Check consistency first
-    mismatches = verify_human_consistency(models, questions)
-    if mismatches:
-        print("WARNING: Inconsistent human responses found:")
-        for m in mismatches:
-            print(f"Question {m['question']}, Task {m['task']}:")
-            for model in models:
-                print(f"{model}: {m[f'{model}_responses']}")
-            print()
-        raise ValueError("Human responses not consistent across models")
-
-    # Load all response data
+    # Load aligned data for each question
     all_responses = {}
-    for model, n in product(models, questions):
-        responses = load_data(model, n)
-        # Convert to numpy array and transpose so each row is a judge
-        responses = np.array(responses).T
+    for n in questions:
+        aligned_data = load_aligned_data(models, n)
 
-        # Store responses for each human judge (5) and LLM
-        for i in range(5):
-            all_responses[f"Human{i+1}_Q{n}"] = responses[i]
-        all_responses[f"{model.upper()}_Q{n}"] = responses[5]
+        for model in models:
+            # Convert to numpy array and transpose
+            responses = np.array([task["responses"] for task in aligned_data[model]]).T
+
+            # Store responses for each human judge (5) and LLM
+            for i in range(5):
+                all_responses[f"Human{i+1}_Q{n}"] = responses[i]
+            all_responses[f"{model.upper()}_Q{n}"] = responses[5]
 
     # Calculate information matrix
     labels = sorted(all_responses.keys())
@@ -153,16 +243,10 @@ def analyze_all_data(models, metric='tvd'):
 
 def compute_aggregate_stats(df_full, models=["QWEN", "GPT"]):
     """
-    Compute aggregate statistics across all questions with flexible model combinations
-
-    Args:
-        df_full: Full DataFrame with TVD-MI scores
-        models: List of model names in uppercase
-
-    Returns:
-        DataFrame with aggregate statistics
+    Compute aggregate statistics with standard errors and significance tests
     """
     aggregates = {q: {} for q in [1,2,3]}
+    std_errors = {q: {} for q in [1,2,3]}
 
     for q in [1,2,3]:
         # Get label groups
@@ -170,49 +254,74 @@ def compute_aggregate_stats(df_full, models=["QWEN", "GPT"]):
         model_labels = [f'{model}_Q{q}' for model in models]
         all_labels = human_labels + model_labels
 
-        # All pairs (excluding diagonal)
-        all_pairs = []
+        # Collect scores for each category
+        all_scores = []
+        human_scores = []
+        model_scores = {model: [] for model in models}
+
+        # All pairs
         for l1, l2 in product(all_labels, all_labels):
-            if l1 != l2:  # Exclude diagonal
-                all_pairs.append(df_full.loc[l1,l2])
+            if l1 != l2:
+                score = df_full.loc[l1,l2]
+                all_scores.append(score)
 
-        # Store all-pairs average
-        aggregates[q]['All'] = np.mean(all_pairs)
+                # Human scores
+                if 'Human' in l1:
+                    human_scores.append(score)
 
-        # Human-Human pairs
-        human_human = []
-        for h1, h2 in product(human_labels, human_labels):
-            if h1 != h2:
-                human_human.append(df_full.loc[h1,h2])
-        aggregates[q]['Human-Human'] = np.mean(human_human)
+                # Model scores
+                for model in models:
+                    if model in l1:
+                        model_scores[model].append(score)
 
-        # Human-Model pairs
+        # Calculate means and standard errors
+        aggregates[q]['All'] = np.mean(all_scores)
+        std_errors[q]['All'] = np.std(all_scores) / np.sqrt(len(all_scores))
+
+        aggregates[q]['Human'] = np.mean(human_scores)
+        std_errors[q]['Human'] = np.std(human_scores) / np.sqrt(len(human_scores))
+
         for model in models:
-            model_label = f'{model}_Q{q}'
-            human_model = []
-            for h in human_labels:
-                # Include both directions
-                human_model.append(df_full.loc[h,model_label])
-                human_model.append(df_full.loc[model_label,h])
-            aggregates[q][f'Human-{model}'] = np.mean(human_model)
+            aggregates[q][model] = np.mean(model_scores[model])
+            std_errors[q][model] = np.std(model_scores[model]) / np.sqrt(len(model_scores[model]))
 
-        # Model-Model pairs (if more than one model)
-        if len(models) > 1:
-            for m1, m2 in product(models, models):
-                if m1 < m2:  # Only do pairs once (alphabetical order)
-                    model_model = []
-                    label1, label2 = f'{m1}_Q{q}', f'{m2}_Q{q}'
-                    # Include both directions
-                    model_model.append(df_full.loc[label1,label2])
-                    model_model.append(df_full.loc[label2,label1])
-                    aggregates[q][f'{m1}-{m2}'] = np.mean(model_model)
+    # Create DataFrames
+    df_means = pd.DataFrame(aggregates).T
+    df_se = pd.DataFrame(std_errors).T
 
-    return pd.DataFrame(aggregates).T
+    # Format output with means ± SE
+    df_formatted = pd.DataFrame(index=df_means.index, columns=df_means.columns)
+    for col in df_means.columns:
+        df_formatted[col] = df_means[col].map('{:.3f}'.format) + ' ± ' + df_se[col].map('{:.3f}'.format)
+
+    return df_formatted, df_means, df_se  # Return raw values too for significance testing
+
+def run_significance_tests(df_means, df_se):
+    """Run significance tests between questions for each agent type"""
+    tests = {}
+    for col in df_means.columns:
+        # Pairwise t-tests between questions
+        pairs = [(1,2), (1,3), (2,3)]
+        tests[col] = {}
+        for q1, q2 in pairs:
+            # Calculate t-statistic
+            diff = df_means.loc[q1,col] - df_means.loc[q2,col]
+            se_diff = np.sqrt(df_se.loc[q1,col]**2 + df_se.loc[q2,col]**2)
+            t_stat = diff / se_diff
+            # Two-tailed p-value (could use scipy.stats for more precise p-values)
+            p_val = 2 * (1 - norm.cdf(abs(t_stat)))
+            tests[col][f'Q{q1}-Q{q2}'] = p_val
+
+    return pd.DataFrame(tests)
 
 # Example usage:
-models = ["qwen", "gpt"]  # Specify models once at top level
+models = ["QWEN", "GPT"]  # Specify models once at top level
 df_full, df_summary = analyze_all_data(models)
-print("\nFull Matrix:")
-print(df_full)
-print("\nSummary Statistics:")
-print(df_summary)
+# Usage:
+df_formatted, df_means, df_se = compute_aggregate_stats(df_full, models)
+significance = run_significance_tests(df_means, df_se)
+
+print("\nTVD-MI Scores (mean ± SE):")
+print(df_formatted)
+print("\nSignificance Tests (p-values):")
+print(significance)
