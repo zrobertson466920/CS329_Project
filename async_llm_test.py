@@ -1028,7 +1028,7 @@ async def main_async():
     """
     # Define experiment configuration
     exp_config = {
-        "exp_type": "llm",
+        "exp_type": "simple",
         "num_agents": 6,
         "model_config": {
             "model_name": OPENAI_MODEL,
